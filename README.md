@@ -90,13 +90,3 @@ bun run build
 ```
 
 The published package ships compiled output from `dist/`.
-
-## Publish
-
-```bash
-npm login
-npm pack --dry-run
-npm publish
-```
-
-Before publishing, make sure you have created the public repository metadata you want to attach to the package, such as the GitHub repository URL.
