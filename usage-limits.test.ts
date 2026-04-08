@@ -11,7 +11,8 @@ import { buildCodexModels } from "./src/models.js"
 import { extractAccountId, extractPlanType, extractUserId } from "./src/oauth.js"
 import { CodexMultiAuthPlugin } from "./src/plugin.js"
 import { getAccountsPath, loadStore, saveStore, type Account } from "./src/storage.js"
-import { measureMenuItemRows, visibleMenuWindow } from "./src/ui/select.js"
+import { ANSI } from "./src/ui/ansi.js"
+import { measureMenuItemRows, styleDetailLine, visibleMenuWindow } from "./src/ui/select.js"
 
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "opencode-codex-"))
@@ -294,9 +295,17 @@ test("buildAccountMenuItems shows remaining quota", () => {
   expect(items[0]?.detailQuotaLines[0]).toContain("5h")
   expect(items[0]?.detailQuotaLines[0]).toContain("28% left")
   expect(items[0]?.detailQuotaLines[0]).toContain("█")
+  expect(items[0]?.detailQuotaLines[0]).not.toContain(ANSI.dim)
   expect(items[0]?.detailQuotaLines[2]).toContain("weekly")
   expect(items[0]?.detailQuotaLines[2]).toContain("95% left")
   expect(items[0]?.fallbackQuotaLines[0]).toContain("=")
+})
+
+test("styleDetailLine preserves ANSI-styled usage lines for inactive rows", () => {
+  const quotaLine = `${ANSI.cyan}5h${ANSI.reset} ${ANSI.bold}83%${ANSI.reset}`
+
+  expect(styleDetailLine(quotaLine, false)).toBe(quotaLine)
+  expect(styleDetailLine("used today", false)).toBe(`${ANSI.dim}used today${ANSI.reset}`)
 })
 
 test("buildAccountMenuItems marks current account and surfaces saved label", () => {

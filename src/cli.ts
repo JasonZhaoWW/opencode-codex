@@ -107,7 +107,7 @@ function progressBar(percent: number | undefined, width: number, mode: BarMode) 
   const filled = `${"█".repeat(full)}${PARTIAL_BLOCKS[partial]}`
   const empty = "░".repeat(width - usedCells)
   if (clamped === undefined) return `${ANSI.dim}${empty}${ANSI.reset}`
-  return `${tone(clamped)}${filled}${ANSI.reset}${ANSI.dim}${empty}${ANSI.reset}`
+  return `${tone(clamped)}${filled}${ANSI.reset}${empty}`
 }
 
 function compactUsageSummary(win: LimitWindow | undefined, fallbackMinutes: number) {

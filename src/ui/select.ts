@@ -55,6 +55,11 @@ function dimAnsi(input: string) {
   return `${ANSI.dim}${input.replaceAll(ANSI.reset, `${ANSI.reset}${ANSI.dim}`)}${ANSI.reset}`
 }
 
+export function styleDetailLine(input: string, selected: boolean) {
+  if (selected || input.includes("\x1b[")) return input
+  return dimAnsi(input)
+}
+
 function colorCode(color: MenuItem["color"]) {
   if (color === "red") return ANSI.red
   if (color === "green") return ANSI.green
@@ -153,7 +158,7 @@ export async function select<T>(items: MenuItem<T>[], options: SelectOptions): P
 
     const writeDetails = (details: string[] | undefined, selected: boolean) => {
       for (const line of details ?? []) {
-        const text = truncateAnsi(selected ? line : dimAnsi(line), Math.max(1, columns - 6))
+        const text = truncateAnsi(styleDetailLine(line, selected), Math.max(1, columns - 6))
         writeLine(`${ANSI.cyan}│${ANSI.reset}    ${text}`)
       }
     }
