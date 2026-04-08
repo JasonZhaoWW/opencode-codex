@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline/promises"
 import { stdin as input, stdout as output } from "node:process"
 import { DEFAULT_LIMIT_ID } from "./constants.js"
-import { limitBlocked, limitReset } from "./limits.js"
+import { limitBlocked, limitReset, type LimitSnapshot, type LimitWindow } from "./limits.js"
 import type { Account } from "./storage.js"
 import { ANSI, isTTY } from "./ui/ansi.js"
 import { confirm } from "./ui/confirm.js"
@@ -13,6 +13,9 @@ export type Item = {
   secondary: string
   menuHint: string
   quotaSummary: string
+  detailLines: string[]
+  detailQuotaLines: string[]
+  fallbackQuotaLines: string[]
   current: boolean
 }
 
@@ -37,6 +40,11 @@ type TopLevelChoice =
   | { type: "done" }
 
 type AccountChoice = Action | { type: "back" }
+type BarMode = "tty" | "text"
+
+const PRIMARY_WINDOW_MINUTES = 300
+const SECONDARY_WINDOW_MINUTES = 10080
+const PARTIAL_BLOCKS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"] as const
 
 function label(mins: number | undefined) {
   if (mins === undefined) return "limit"
@@ -50,8 +58,7 @@ function remain(used: number) {
   return Math.max(0, Math.min(100, 100 - used))
 }
 
-function describe(acc: Account, id: string) {
-  const snap = acc.limits[id]
+function describeLoaded(snap: LimitSnapshot | undefined) {
   if (!snap) return []
   return [snap.primary, snap.secondary].flatMap((win) => {
     if (!win) return []
@@ -69,12 +76,75 @@ function shortLabel(mins: number | undefined) {
   return "yr"
 }
 
-function describeCompact(acc: Account, id: string) {
-  const snap = acc.limits[id]
-  if (!snap) return []
-  return [snap.primary, snap.secondary].flatMap((win) => {
-    if (!win) return []
-    return [`${shortLabel(win.windowMinutes)} ${Math.round(remain(win.usedPercent))}%`]
+function tone(percent: number | undefined) {
+  if (percent === undefined) return ANSI.dim
+  if (percent < 30) return ANSI.red
+  if (percent < 60) return ANSI.yellow
+  return ANSI.green
+}
+
+function percentText(percent: number | undefined, long = false) {
+  if (percent === undefined) return long ? "not loaded" : "n/a"
+  return long ? `${percent}% left` : `${percent}%`
+}
+
+function progressBar(percent: number | undefined, width: number, mode: BarMode) {
+  if (mode === "text") {
+    const filled = percent === undefined ? 0 : Math.max(0, Math.min(width, Math.round((percent / 100) * width)))
+    return `[${"=".repeat(filled)}${".".repeat(width - filled)}]`
+  }
+
+  const clamped = percent === undefined ? undefined : Math.max(0, Math.min(100, percent))
+  const scaled = clamped === undefined ? 0 : (clamped / 100) * width
+  let full = Math.floor(scaled)
+  let partial = Math.round((scaled - full) * 8)
+  if (partial === 8) {
+    full += 1
+    partial = 0
+  }
+  full = Math.min(width, full)
+  const usedCells = Math.min(width, full + (partial > 0 ? 1 : 0))
+  const filled = `${"█".repeat(full)}${PARTIAL_BLOCKS[partial]}`
+  const empty = "░".repeat(width - usedCells)
+  if (clamped === undefined) return `${ANSI.dim}${empty}${ANSI.reset}`
+  return `${tone(clamped)}${filled}${ANSI.reset}${ANSI.dim}${empty}${ANSI.reset}`
+}
+
+function compactUsageSummary(win: LimitWindow | undefined, fallbackMinutes: number) {
+  const percent = win ? Math.round(remain(win.usedPercent)) : undefined
+  return `${shortLabel(win?.windowMinutes ?? fallbackMinutes)} ${percentText(percent)}`
+}
+
+function windowCompact(win: LimitWindow | undefined, fallbackMinutes: number, mode: BarMode, width: number) {
+  const percent = win ? Math.round(remain(win.usedPercent)) : undefined
+  const name = `${ANSI.cyan}${shortLabel(win?.windowMinutes ?? fallbackMinutes)}${ANSI.reset}`
+  const amount = `${ANSI.bold}${percentText(percent).padStart(4)}${ANSI.reset}`
+  return `${name} ${amount} ${progressBar(percent, width, mode)}`
+}
+
+function windowDetail(win: LimitWindow | undefined, fallbackMinutes: number, mode: BarMode, width: number) {
+  const percent = win ? Math.round(remain(win.usedPercent)) : undefined
+  const name = `${ANSI.cyan}${label(win?.windowMinutes ?? fallbackMinutes).padEnd(7)}${ANSI.reset}`
+  const amount = percent === undefined ? `${ANSI.dim}${percentText(percent, true)}${ANSI.reset}` : `${ANSI.bold}${percentText(percent, true)}${ANSI.reset}`
+  return `${name} ${progressBar(percent, width, mode)} ${amount}`
+}
+
+function resetLine(win: LimitWindow | undefined) {
+  if (!win?.resetsAt) return
+  return `resets ${new Date(win.resetsAt * 1000).toLocaleString()}`
+}
+
+function extraQuotaLines(acc: Account) {
+  return Object.entries(acc.limits).flatMap(([id, snap]) => {
+    if (id === DEFAULT_LIMIT_ID) return []
+    const name = snap.limitName || id
+    return [snap.primary, snap.secondary].flatMap((win) => {
+      if (!win) return []
+      const lines = [`${name} ${label(win.windowMinutes)} ${Math.round(remain(win.usedPercent))}% left`]
+      const reset = resetLine(win)
+      if (reset) lines.push(`  ${reset}`)
+      return lines
+    })
   })
 }
 
@@ -94,50 +164,66 @@ function writer(io?: PromptIO) {
 export function buildAccountMenuItems(accounts: Account[], activeIndex = -1): Item[] {
   return accounts.map((acc, index) => {
     const active = acc.limits[acc.activeLimitId] || acc.limits[DEFAULT_LIMIT_ID]
+    const base = acc.limits[DEFAULT_LIMIT_ID]
     const status =
       acc.enabled === false
         ? "disabled"
         : (acc.rateLimitResetTime && acc.rateLimitResetTime > Date.now()) || limitBlocked(active)
           ? "rate-limited"
           : "active"
-    const base = describe(acc, DEFAULT_LIMIT_ID)
-    const compactBase = describeCompact(acc, DEFAULT_LIMIT_ID)
+    const summaryBase = describeLoaded(base)
     const extra = Object.entries(acc.limits).flatMap(([id, snap]) => {
       if (id === DEFAULT_LIMIT_ID) return []
-      const hit = describe(acc, id)
+      const hit = describeLoaded(snap)
       if (hit.length === 0) return []
       return [`${snap.limitName || id} ${hit.join(" / ")}`]
     })
-    const compactExtra = Object.entries(acc.limits).flatMap(([id, snap]) => {
-      if (id === DEFAULT_LIMIT_ID) return []
-      const hit = describeCompact(acc, id)
-      if (hit.length === 0) return []
-      return [`${snap.limitName || id} ${hit.join(" / ")}`]
-    })
-    const quotaSummary = [...base, ...extra].join(" | ") || "quota not loaded yet"
-    const secondary = [
-      acc.email && acc.email !== acc.label ? `label ${acc.label}` : undefined,
-      acc.lastUsed > 0 ? `used ${relativeTime(acc.lastUsed)}` : "never used",
-    ]
-      .filter((value): value is string => Boolean(value))
-      .join(" | ")
+    const quotaSummary = [...summaryBase, ...extra].join(" | ") || "quota not loaded yet"
     const nextReset = (() => {
       if (acc.rateLimitResetTime && acc.rateLimitResetTime > Date.now()) return acc.rateLimitResetTime
       return limitReset(active, Date.now())
     })()
-    const menuHint = [
-      secondary,
-      [...compactBase, ...compactExtra].join(" | ") || "quota unknown",
+    const secondary = [
+      acc.email && acc.email !== acc.label ? `label ${acc.label}` : undefined,
+      acc.lastUsed > 0 ? `used ${relativeTime(acc.lastUsed)}` : "never used",
       status === "rate-limited" && nextReset ? `next ${new Date(nextReset).toLocaleTimeString()}` : undefined,
     ]
       .filter((value): value is string => Boolean(value))
       .join(" | ")
+    const usageLine = [
+      windowCompact(base?.primary, PRIMARY_WINDOW_MINUTES, "tty", 10),
+      windowCompact(base?.secondary, SECONDARY_WINDOW_MINUTES, "tty", 10),
+    ].join(` ${ANSI.dim}·${ANSI.reset} `)
+    const menuHint = [
+      secondary,
+      compactUsageSummary(base?.primary, PRIMARY_WINDOW_MINUTES),
+      compactUsageSummary(base?.secondary, SECONDARY_WINDOW_MINUTES),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join(" | ")
+    const detailQuotaLines = [
+      windowDetail(base?.primary, PRIMARY_WINDOW_MINUTES, "tty", 16),
+      resetLine(base?.primary) ? `  ${resetLine(base?.primary)}` : undefined,
+      windowDetail(base?.secondary, SECONDARY_WINDOW_MINUTES, "tty", 16),
+      resetLine(base?.secondary) ? `  ${resetLine(base?.secondary)}` : undefined,
+      ...extraQuotaLines(acc),
+    ].filter((value): value is string => Boolean(value))
+    const fallbackQuotaLines = [
+      windowDetail(base?.primary, PRIMARY_WINDOW_MINUTES, "text", 12),
+      resetLine(base?.primary) ? `  ${resetLine(base?.primary)}` : undefined,
+      windowDetail(base?.secondary, SECONDARY_WINDOW_MINUTES, "text", 12),
+      resetLine(base?.secondary) ? `  ${resetLine(base?.secondary)}` : undefined,
+      ...extraQuotaLines(acc),
+    ].filter((value): value is string => Boolean(value))
     return {
       label: acc.email || acc.label,
       status,
       secondary,
       menuHint,
       quotaSummary,
+      detailLines: [secondary, usageLine].filter((value): value is string => Boolean(value)),
+      detailQuotaLines,
+      fallbackQuotaLines,
       current: index === activeIndex,
     }
   })
@@ -179,8 +265,10 @@ async function promptAccountDetailsTty(accounts: Account[], items: Item[], index
     const choice = await select<AccountChoice>(
       [
         { label: "Back", value: { type: "back" } },
-        { label: `Quota: ${item.quotaSummary}`, value: { type: "back" }, kind: "heading" },
         { label: "", value: { type: "back" }, separator: true },
+        { label: "Usage", value: { type: "back" }, kind: "heading", details: item.detailQuotaLines },
+        { label: "", value: { type: "back" }, separator: true },
+        { label: "Actions", value: { type: "back" }, kind: "heading" },
         { label: "Edit label", value: { type: "rename", index, label: account.label }, color: "cyan" },
         {
           label: account.enabled === false ? "Enable account" : "Disable account",
@@ -214,7 +302,7 @@ async function promptLoginMenuTty(accounts: Account[], activeIndex: number): Pro
       { label: "Accounts", value: { type: "done" }, kind: "heading" },
       ...items.map((item, index) => ({
         label: `${item.label}${item.current ? ` ${ANSI.cyan}[current]${ANSI.reset}` : ""} ${statusBadge(item)}`,
-        hint: item.menuHint,
+        details: item.detailLines,
         value: { type: "account" as const, index },
       })),
       { label: "", value: { type: "done" }, separator: true },
@@ -243,7 +331,8 @@ async function promptAccountDetailsFallback(accounts: Account[], items: Item[], 
       [
         `${item.label}${item.current ? " [current]" : ""} [${item.status}]`,
         `  ${item.secondary}`,
-        `  quota: ${item.quotaSummary}`,
+        "  quota:",
+        ...item.fallbackQuotaLines.map((line) => `    ${line}`),
         "  1. Edit label",
         `  2. ${account.enabled === false ? "Enable" : "Disable"} account`,
         "  3. Refresh quota",
@@ -283,7 +372,8 @@ export async function promptLoginMenuFallback(accounts: Account[], activeIndex =
     for (const [index, item] of items.entries()) {
       lines.push(`  ${index + 3}. ${item.label}${item.current ? " [current]" : ""} [${item.status}]`)
       lines.push(`     ${item.secondary}`)
-      lines.push(`     quota: ${item.quotaSummary}`)
+      lines.push("     quota:")
+      for (const line of item.fallbackQuotaLines) lines.push(`       ${line}`)
     }
     lines.push("  0. Done")
     write(lines.join("\n") + "\n")

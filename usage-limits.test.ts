@@ -10,6 +10,7 @@ import { parseLimitFailure, parseLimitHeaders, parseUsageLimits } from "./src/li
 import { buildCodexModels } from "./src/models.js"
 import { CodexMultiAuthPlugin } from "./src/plugin.js"
 import { getAccountsPath, loadStore, saveStore, type Account } from "./src/storage.js"
+import { measureMenuItemRows, visibleMenuWindow } from "./src/ui/select.js"
 
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "opencode-codex-"))
@@ -233,8 +234,19 @@ test("buildAccountMenuItems shows remaining quota", () => {
   expect(items[0]?.quotaSummary).toContain("5h 28% left")
   expect(items[0]?.quotaSummary).toContain("weekly 95% left")
   expect(items[0]?.menuHint).toContain("5h 28%")
+  expect(items[0]?.menuHint).toContain("28%")
   expect(items[0]?.menuHint).toContain("wk 95%")
+  expect(items[0]?.menuHint).toContain("95%")
   expect(items[0]?.menuHint).not.toContain("resets")
+  expect(items[0]?.detailLines[0]).toBe(items[0]?.secondary)
+  expect(items[0]?.detailLines[1]).toContain("5h")
+  expect(items[0]?.detailLines[1]).toContain("wk")
+  expect(items[0]?.detailQuotaLines[0]).toContain("5h")
+  expect(items[0]?.detailQuotaLines[0]).toContain("28% left")
+  expect(items[0]?.detailQuotaLines[0]).toContain("█")
+  expect(items[0]?.detailQuotaLines[2]).toContain("weekly")
+  expect(items[0]?.detailQuotaLines[2]).toContain("95% left")
+  expect(items[0]?.fallbackQuotaLines[0]).toContain("=")
 })
 
 test("buildAccountMenuItems marks current account and prefers email identity", () => {
@@ -325,6 +337,54 @@ test("promptLoginMenuFallback returns quota action", async () => {
       write: () => undefined,
     }),
   ).toEqual({ type: "quota", index: 0 })
+})
+
+test("promptLoginMenuFallback shows structured quota lines", async () => {
+  const writes: string[] = []
+
+  await promptLoginMenuFallback(
+    [
+      account("ready", {
+        codex: {
+          capturedAt: Date.now(),
+          primary: { usedPercent: 72.5, windowMinutes: 300, resetsAt: 1_700_000_000 },
+          secondary: { usedPercent: 5, windowMinutes: 10080, resetsAt: 1_700_100_000 },
+        },
+      }),
+    ],
+    0,
+    {
+      ask: async () => "0",
+      write: (text) => {
+        writes.push(text)
+      },
+    },
+  )
+
+  const output = writes.join("\n")
+  expect(output).toContain("quota:")
+  expect(output).toContain("5h")
+  expect(output).toContain("28% left")
+  expect(output).toContain("weekly")
+  expect(output).toContain("95% left")
+})
+
+test("measureMenuItemRows counts detail lines", () => {
+  expect(measureMenuItemRows({ label: "plain", value: "x" })).toBe(1)
+  expect(measureMenuItemRows({ label: "with details", value: "x", details: ["a", "b"] })).toBe(3)
+  expect(measureMenuItemRows({ label: "heading", value: "x", kind: "heading", details: ["a"] })).toBe(2)
+})
+
+test("visibleMenuWindow budgets rows for multi-line items", () => {
+  const items = [
+    { label: "first", value: "first" },
+    { label: "second", value: "second", details: ["a", "b"] },
+    { label: "third", value: "third", details: ["a", "b"] },
+    { label: "fourth", value: "fourth" },
+  ]
+
+  expect(visibleMenuWindow(items, 2, 5)).toEqual({ windowStart: 2, windowEnd: 4 })
+  expect(visibleMenuWindow(items, 1, 4)).toEqual({ windowStart: 0, windowEnd: 2 })
 })
 
 test("account manager rename updates stored label", async () => {

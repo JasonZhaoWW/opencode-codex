@@ -4,6 +4,7 @@ export type MenuItem<T = string> = {
   label: string
   value: T
   hint?: string
+  details?: string[]
   disabled?: boolean
   separator?: boolean
   kind?: "heading"
@@ -50,12 +51,70 @@ function truncateAnsi(input: string, maxVisibleChars: number) {
   return out.includes("\x1b[") ? `${out}${ANSI.reset}${suffix}` : out + suffix
 }
 
+function dimAnsi(input: string) {
+  return `${ANSI.dim}${input.replaceAll(ANSI.reset, `${ANSI.reset}${ANSI.dim}`)}${ANSI.reset}`
+}
+
 function colorCode(color: MenuItem["color"]) {
   if (color === "red") return ANSI.red
   if (color === "green") return ANSI.green
   if (color === "yellow") return ANSI.yellow
   if (color === "cyan") return ANSI.cyan
   return ""
+}
+
+export function measureMenuItemRows<T>(item: MenuItem<T>) {
+  if (item.separator) return 1
+  return 1 + (item.details?.length ?? 0)
+}
+
+function sumMenuRows<T>(items: MenuItem<T>[], start: number, end: number) {
+  let total = 0
+  for (let index = start; index < end; index++) total += measureMenuItemRows(items[index]!)
+  return total
+}
+
+export function visibleMenuWindow<T>(items: MenuItem<T>[], cursor: number, maxRows: number) {
+  if (items.length === 0) return { windowStart: 0, windowEnd: 0 }
+  const safeCursor = Math.max(0, Math.min(cursor, items.length - 1))
+  let windowStart = safeCursor
+  let windowEnd = safeCursor + 1
+  let usedRows = measureMenuItemRows(items[safeCursor]!)
+  const budget = Math.max(1, maxRows)
+
+  if (usedRows >= budget) return { windowStart, windowEnd }
+
+  while (true) {
+    const prevRows = windowStart > 0 ? measureMenuItemRows(items[windowStart - 1]!) : undefined
+    const nextRows = windowEnd < items.length ? measureMenuItemRows(items[windowEnd]!) : undefined
+    const rowsAbove = sumMenuRows(items, windowStart, safeCursor)
+    const rowsBelow = sumMenuRows(items, safeCursor + 1, windowEnd)
+    const preferPrev = rowsAbove <= rowsBelow
+    let expanded = false
+    const tryExpand = (direction: "prev" | "next") => {
+      if (direction === "prev" && prevRows !== undefined && usedRows + prevRows <= budget) {
+        windowStart -= 1
+        usedRows += prevRows
+        expanded = true
+      }
+      if (direction === "next" && nextRows !== undefined && usedRows + nextRows <= budget) {
+        windowEnd += 1
+        usedRows += nextRows
+        expanded = true
+      }
+    }
+
+    if (preferPrev) {
+      tryExpand("prev")
+      if (!expanded) tryExpand("next")
+    } else {
+      tryExpand("next")
+      if (!expanded) tryExpand("prev")
+    }
+    if (!expanded) break
+  }
+
+  return { windowStart, windowEnd }
 }
 
 export async function select<T>(items: MenuItem<T>[], options: SelectOptions): Promise<T | null> {
@@ -88,14 +147,16 @@ export async function select<T>(items: MenuItem<T>[], options: SelectOptions): P
 
     const subtitleLines = options.subtitle ? 3 : 0
     const fixedLines = 1 + subtitleLines + 2
-    const maxVisibleItems = Math.max(1, Math.min(items.length, rows - fixedLines - 1))
-    let windowStart = 0
-    let windowEnd = items.length
-    if (items.length > maxVisibleItems) {
-      windowStart = Math.max(0, Math.min(cursor - Math.floor(maxVisibleItems / 2), items.length - maxVisibleItems))
-      windowEnd = windowStart + maxVisibleItems
-    }
+    const maxVisibleRows = Math.max(1, rows - fixedLines - 1)
+    const { windowStart, windowEnd } = visibleMenuWindow(items, cursor, maxVisibleRows)
     const visibleItems = items.slice(windowStart, windowEnd)
+
+    const writeDetails = (details: string[] | undefined, selected: boolean) => {
+      for (const line of details ?? []) {
+        const text = truncateAnsi(selected ? line : dimAnsi(line), Math.max(1, columns - 6))
+        writeLine(`${ANSI.cyan}│${ANSI.reset}    ${text}`)
+      }
+    }
 
     writeLine(`${ANSI.dim}┌  ${ANSI.reset}${truncateAnsi(options.message, Math.max(1, columns - 4))}`)
     if (options.subtitle) {
@@ -112,6 +173,7 @@ export async function select<T>(items: MenuItem<T>[], options: SelectOptions): P
       }
       if (item.kind === "heading") {
         writeLine(`${ANSI.cyan}│${ANSI.reset}  ${truncateAnsi(`${ANSI.dim}${ANSI.bold}${item.label}${ANSI.reset}`, Math.max(1, columns - 6))}`)
+        writeDetails(item.details, true)
         continue
       }
       const selected = itemIndex === cursor
@@ -125,6 +187,7 @@ export async function select<T>(items: MenuItem<T>[], options: SelectOptions): P
       if (item.hint) label += ` ${ANSI.dim}${item.hint}${ANSI.reset}`
       label = truncateAnsi(label, Math.max(1, columns - 8))
       writeLine(`${ANSI.cyan}│${ANSI.reset}  ${selected ? `${ANSI.green}●${ANSI.reset}` : `${ANSI.dim}○${ANSI.reset}`} ${label}`)
+      writeDetails(item.details, selected)
     }
 
     const windowHint = items.length > visibleItems.length ? ` (${windowStart + 1}-${windowEnd}/${items.length})` : ""
