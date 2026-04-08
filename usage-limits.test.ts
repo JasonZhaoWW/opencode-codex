@@ -321,6 +321,13 @@ test("buildAccountMenuItems marks current account and surfaces saved label", () 
   expect(items[1]?.menuHint).toContain("used today")
 })
 
+test("buildAccountMenuItems treats the first account as current when none is selected", () => {
+  const items = buildAccountMenuItems([account("work", {}), account("personal", {})])
+
+  expect(items[0]?.current).toBe(true)
+  expect(items[1]?.current).toBe(false)
+})
+
 test("promptLoginMenuFallback retries invalid top-level input", async () => {
   const answers = ["nope", "1"]
   const writes: string[] = []
@@ -427,6 +434,19 @@ test("promptLoginMenuFallback shows structured quota lines", async () => {
   expect(output).toContain("28% left")
   expect(output).toContain("weekly")
   expect(output).toContain("95% left")
+})
+
+test("promptLoginMenuFallback prints status before current", async () => {
+  const writes: string[] = []
+
+  await promptLoginMenuFallback([account("ready", {})], -1, {
+    ask: async () => "0",
+    write: (text) => {
+      writes.push(text)
+    },
+  })
+
+  expect(writes.join("\n")).toContain("ready [active] [current]")
 })
 
 test("measureMenuItemRows counts detail lines", () => {

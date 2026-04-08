@@ -19,6 +19,10 @@ export type Item = {
   current: boolean
 }
 
+function isCurrentAccount(index: number, activeIndex: number) {
+  return index === activeIndex || (activeIndex < 0 && index === 0)
+}
+
 export type Action =
   | { type: "add-browser" }
   | { type: "add-headless" }
@@ -226,7 +230,7 @@ export function buildAccountMenuItems(accounts: Account[], activeIndex = -1): It
       detailLines: [secondary, usageLine].filter((value): value is string => Boolean(value)),
       detailQuotaLines,
       fallbackQuotaLines,
-      current: index === activeIndex,
+      current: isCurrentAccount(index, activeIndex),
     }
   })
 }
@@ -252,10 +256,15 @@ function statusBadge(item: Item) {
   return `${ANSI.red}[disabled]${ANSI.reset}`
 }
 
+function itemBadges(item: Item) {
+  const current = item.current ? `${ANSI.cyan}[current]${ANSI.reset}` : ""
+  return [statusBadge(item), current].filter((value) => value.length > 0).join(" ")
+}
+
 function summary(accounts: Account[], items: Item[], activeIndex: number) {
   const enabled = accounts.filter((account) => account.enabled !== false).length
   const rateLimited = items.filter((item) => item.status === "rate-limited").length
-  const current = items[activeIndex]?.label || "none"
+  const current = items.find((item, index) => isCurrentAccount(index, activeIndex))?.label || "none"
   return `${enabled} enabled | ${rateLimited} rate-limited | current: ${current}`
 }
 
@@ -281,7 +290,7 @@ async function promptAccountDetailsTty(accounts: Account[], items: Item[], index
         { label: "Remove account", value: { type: "remove", index }, color: "red" },
       ],
       {
-        message: `${item.label}${item.current ? ` ${ANSI.cyan}[current]${ANSI.reset}` : ""} ${statusBadge(item)}`,
+        message: `${item.label} ${itemBadges(item)}`,
         subtitle: item.secondary,
         clearScreen: true,
       },
@@ -303,7 +312,7 @@ async function promptLoginMenuTty(accounts: Account[], activeIndex: number): Pro
       { label: "", value: { type: "done" }, separator: true },
       { label: "Accounts", value: { type: "done" }, kind: "heading" },
       ...items.map((item, index) => ({
-        label: `${item.label}${item.current ? ` ${ANSI.cyan}[current]${ANSI.reset}` : ""} ${statusBadge(item)}`,
+        label: `${item.label} ${itemBadges(item)}`,
         details: item.detailLines,
         value: { type: "account" as const, index },
       })),
@@ -331,7 +340,7 @@ async function promptAccountDetailsFallback(accounts: Account[], items: Item[], 
   while (true) {
     write(
       [
-        `${item.label}${item.current ? " [current]" : ""} [${item.status}]`,
+        `${item.label} [${item.status}]${item.current ? " [current]" : ""}`,
         `  ${item.secondary}`,
         "  quota:",
         ...item.fallbackQuotaLines.map((line) => `    ${line}`),
@@ -372,7 +381,7 @@ export async function promptLoginMenuFallback(accounts: Account[], activeIndex =
       "  2. Add account (headless)",
     ]
     for (const [index, item] of items.entries()) {
-      lines.push(`  ${index + 3}. ${item.label}${item.current ? " [current]" : ""} [${item.status}]`)
+      lines.push(`  ${index + 3}. ${item.label} [${item.status}]${item.current ? " [current]" : ""}`)
       lines.push(`     ${item.secondary}`)
       lines.push("     quota:")
       for (const line of item.fallbackQuotaLines) lines.push(`       ${line}`)
