@@ -18,6 +18,10 @@ function now() {
 
 function applyIdentity(acc: Account, identity: TokenIdentity) {
   let changed = false
+  if (identity.planType && acc.planType !== identity.planType) {
+    acc.planType = identity.planType
+    changed = true
+  }
   if (identity.userId && acc.userId !== identity.userId) {
     acc.userId = identity.userId
     changed = true
@@ -116,6 +120,7 @@ export class AccountManager {
         accessToken: account.accessToken,
         refreshToken: account.refreshToken,
         tokenExpires: account.tokenExpires,
+        planType: account.planType,
         userId: account.userId,
         accountId: account.accountId,
         email: account.email,

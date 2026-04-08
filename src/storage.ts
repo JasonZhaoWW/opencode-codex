@@ -47,6 +47,7 @@ async function lock(dir: string) {
 const Account = z.object({
   label: z.string(),
   email: z.string().optional(),
+  planType: z.string().optional(),
   userId: z.string().optional(),
   refreshToken: z.string(),
   accessToken: z.string(),

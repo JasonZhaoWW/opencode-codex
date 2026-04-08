@@ -8,7 +8,7 @@ import { buildAccountMenuItems, promptAccountLabel, promptLoginMenuFallback } fr
 import { DEFAULT_LIMIT_ID } from "./src/constants.js"
 import { parseLimitFailure, parseLimitHeaders, parseUsageLimits } from "./src/limits.js"
 import { buildCodexModels } from "./src/models.js"
-import { extractAccountId, extractUserId } from "./src/oauth.js"
+import { extractAccountId, extractPlanType, extractUserId } from "./src/oauth.js"
 import { CodexMultiAuthPlugin } from "./src/plugin.js"
 import { getAccountsPath, loadStore, saveStore, type Account } from "./src/storage.js"
 import { measureMenuItemRows, visibleMenuWindow } from "./src/ui/select.js"
@@ -60,11 +60,13 @@ function oauthToken({
   userId,
   accountId,
   organizationId,
+  planType,
   refreshToken = `${userId || "user"}-${accountId || organizationId || "account"}-refresh`,
 }: {
   userId?: string
   accountId?: string
   organizationId?: string
+  planType?: string
   refreshToken?: string
 } = {}) {
   return {
@@ -72,6 +74,7 @@ function oauthToken({
       email: "user@example.com",
       ...(organizationId ? { organizations: [{ id: organizationId }] } : {}),
       "https://api.openai.com/auth": {
+        ...(planType ? { chatgpt_plan_type: planType } : {}),
         ...(userId ? { chatgpt_user_id: userId, user_id: userId } : {}),
         ...(accountId ? { chatgpt_account_id: accountId } : {}),
         ...(organizationId ? { organization_id: organizationId } : {}),
@@ -170,8 +173,9 @@ test("parseUsageLimits normalizes default and additional usage buckets", () => {
 })
 
 test("oauth identity extraction separates user and account ids", () => {
-  const token = oauthToken({ userId: "user-123", accountId: "acct-shared", organizationId: "org-blue" })
+  const token = oauthToken({ userId: "user-123", accountId: "acct-shared", organizationId: "org-blue", planType: "business" })
 
+  expect(extractPlanType(token)).toBe("business")
   expect(extractUserId(token)).toBe("user-123")
   expect(extractAccountId(token)).toBe("acct-shared")
 })
@@ -297,12 +301,13 @@ test("buildAccountMenuItems shows remaining quota", () => {
 
 test("buildAccountMenuItems marks current account and surfaces saved label", () => {
   const items = buildAccountMenuItems(
-    [account("work", {}), account("personal", {}, DEFAULT_LIMIT_ID, { email: "person@example.com", lastUsed: Date.now() - 60_000 })],
+    [account("work", {}), account("personal", {}, DEFAULT_LIMIT_ID, { email: "person@example.com", planType: "business", lastUsed: Date.now() - 60_000 })],
     1,
   )
 
   expect(items[1]?.label).toBe("personal")
   expect(items[1]?.current).toBe(true)
+  expect(items[1]?.secondary).toContain("plan business")
   expect(items[1]?.secondary).toContain("person@example.com")
   expect(items[1]?.menuHint).toContain("used today")
 })
@@ -460,7 +465,7 @@ test("account manager load migrates missing user ids from tokens", async () => {
       activeIndex: 0,
       accounts: [
         account("legacy", {}, DEFAULT_LIMIT_ID, {
-          accessToken: oauthToken({ userId: "user-123", accountId: "acct-shared", organizationId: "org-blue" }).access_token,
+          accessToken: oauthToken({ userId: "user-123", accountId: "acct-shared", organizationId: "org-blue", planType: "business" }).access_token,
         }),
       ],
     })
@@ -469,6 +474,7 @@ test("account manager load migrates missing user ids from tokens", async () => {
     clear(mgr)
 
     expect((await loadStore()).accounts[0]).toMatchObject({
+      planType: "business",
       userId: "user-123",
       accountId: "acct-shared",
     })

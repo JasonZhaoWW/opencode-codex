@@ -185,6 +185,7 @@ export function buildAccountMenuItems(accounts: Account[], activeIndex = -1): It
       return limitReset(active, Date.now())
     })()
     const secondary = [
+      acc.planType ? `plan ${acc.planType}` : undefined,
       acc.email && acc.email !== displayLabel ? acc.email : undefined,
       acc.lastUsed > 0 ? `used ${relativeTime(acc.lastUsed)}` : "never used",
       status === "rate-limited" && nextReset ? `next ${new Date(nextReset).toLocaleTimeString()}` : undefined,

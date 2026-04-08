@@ -22,12 +22,14 @@ export type TokenResponse = {
 
 export type Claims = {
   email?: string
+  chatgpt_plan_type?: string
   chatgpt_user_id?: string
   chatgpt_account_id?: string
   user_id?: string
   organization_id?: string
   organizations?: Array<{ id?: string }>
   "https://api.openai.com/auth"?: {
+    chatgpt_plan_type?: string
     chatgpt_user_id?: string
     chatgpt_account_id?: string
     user_id?: string
@@ -36,6 +38,7 @@ export type Claims = {
 }
 
 export type TokenIdentity = {
+  planType?: string
   userId?: string
   accountId?: string
 }
@@ -183,6 +186,12 @@ export function extractAccountIdentity(tokens: Pick<TokenResponse, "id_token" | 
   const idClaims = parseJwtClaims(tokens.id_token)
   const accessClaims = parseJwtClaims(tokens.access_token)
   return {
+    planType: pickClaim(
+      idClaims?.["https://api.openai.com/auth"]?.chatgpt_plan_type,
+      idClaims?.chatgpt_plan_type,
+      accessClaims?.["https://api.openai.com/auth"]?.chatgpt_plan_type,
+      accessClaims?.chatgpt_plan_type,
+    ),
     userId: pickClaim(
       idClaims?.["https://api.openai.com/auth"]?.chatgpt_user_id,
       idClaims?.["https://api.openai.com/auth"]?.user_id,
@@ -214,6 +223,10 @@ export function extractAccountId(tokens: Pick<TokenResponse, "id_token" | "acces
 
 export function extractUserId(tokens: Pick<TokenResponse, "id_token" | "access_token">) {
   return extractAccountIdentity(tokens).userId
+}
+
+export function extractPlanType(tokens: Pick<TokenResponse, "id_token" | "access_token">) {
+  return extractAccountIdentity(tokens).planType
 }
 
 export function extractEmail(tokens: Pick<TokenResponse, "id_token" | "access_token">) {
