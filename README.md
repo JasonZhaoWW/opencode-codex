@@ -43,7 +43,7 @@ In a normal TTY terminal it opens a navigable account-management menu. In non-TT
 From the management flow you can:
 
 - Inspect which account is currently active for routing
-- See account identity using email when available, plus the saved label
+- See the saved label, plus account email when available
 - Review enabled, disabled, and rate-limited state with quota summaries
 - Edit an account label
 - Enable or disable an account

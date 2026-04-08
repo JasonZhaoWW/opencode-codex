@@ -249,15 +249,15 @@ test("buildAccountMenuItems shows remaining quota", () => {
   expect(items[0]?.fallbackQuotaLines[0]).toContain("=")
 })
 
-test("buildAccountMenuItems marks current account and prefers email identity", () => {
+test("buildAccountMenuItems marks current account and surfaces saved label", () => {
   const items = buildAccountMenuItems(
     [account("work", {}), account("personal", {}, DEFAULT_LIMIT_ID, { email: "person@example.com", lastUsed: Date.now() - 60_000 })],
     1,
   )
 
-  expect(items[1]?.label).toBe("person@example.com")
+  expect(items[1]?.label).toBe("personal")
   expect(items[1]?.current).toBe(true)
-  expect(items[1]?.secondary).toContain("label personal")
+  expect(items[1]?.secondary).toContain("person@example.com")
   expect(items[1]?.menuHint).toContain("used today")
 })
 

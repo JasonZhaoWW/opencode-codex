@@ -163,6 +163,7 @@ function writer(io?: PromptIO) {
 
 export function buildAccountMenuItems(accounts: Account[], activeIndex = -1): Item[] {
   return accounts.map((acc, index) => {
+    const displayLabel = acc.label || acc.email || "account"
     const active = acc.limits[acc.activeLimitId] || acc.limits[DEFAULT_LIMIT_ID]
     const base = acc.limits[DEFAULT_LIMIT_ID]
     const status =
@@ -184,7 +185,7 @@ export function buildAccountMenuItems(accounts: Account[], activeIndex = -1): It
       return limitReset(active, Date.now())
     })()
     const secondary = [
-      acc.email && acc.email !== acc.label ? `label ${acc.label}` : undefined,
+      acc.email && acc.email !== displayLabel ? acc.email : undefined,
       acc.lastUsed > 0 ? `used ${relativeTime(acc.lastUsed)}` : "never used",
       status === "rate-limited" && nextReset ? `next ${new Date(nextReset).toLocaleTimeString()}` : undefined,
     ]
@@ -216,7 +217,7 @@ export function buildAccountMenuItems(accounts: Account[], activeIndex = -1): It
       ...extraQuotaLines(acc),
     ].filter((value): value is string => Boolean(value))
     return {
-      label: acc.email || acc.label,
+      label: displayLabel,
       status,
       secondary,
       menuHint,
