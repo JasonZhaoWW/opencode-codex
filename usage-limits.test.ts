@@ -8,6 +8,7 @@ import { buildAccountMenuItems, promptAccountLabel, promptLoginMenuFallback } fr
 import { DEFAULT_LIMIT_ID } from "./src/constants.js"
 import { parseLimitFailure, parseLimitHeaders, parseUsageLimits } from "./src/limits.js"
 import { buildCodexModels } from "./src/models.js"
+import { extractAccountId, extractUserId } from "./src/oauth.js"
 import { CodexMultiAuthPlugin } from "./src/plugin.js"
 import { getAccountsPath, loadStore, saveStore, type Account } from "./src/storage.js"
 import { measureMenuItemRows, visibleMenuWindow } from "./src/ui/select.js"
@@ -48,6 +49,37 @@ function account(label: string, limits: Account["limits"], activeLimitId = DEFAU
 
 function clear(mgr: AccountManager) {
   clearTimeout((mgr as unknown as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer)
+}
+
+function jwt(payload: Record<string, unknown>) {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url")
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.${Buffer.from("sig").toString("base64url")}`
+}
+
+function oauthToken({
+  userId,
+  accountId,
+  organizationId,
+  refreshToken = `${userId || "user"}-${accountId || organizationId || "account"}-refresh`,
+}: {
+  userId?: string
+  accountId?: string
+  organizationId?: string
+  refreshToken?: string
+} = {}) {
+  return {
+    access_token: jwt({
+      email: "user@example.com",
+      ...(organizationId ? { organizations: [{ id: organizationId }] } : {}),
+      "https://api.openai.com/auth": {
+        ...(userId ? { chatgpt_user_id: userId, user_id: userId } : {}),
+        ...(accountId ? { chatgpt_account_id: accountId } : {}),
+        ...(organizationId ? { organization_id: organizationId } : {}),
+      },
+    }),
+    refresh_token: refreshToken,
+    expires_in: 3600,
+  }
 }
 
 test("parseLimitHeaders reads default and alternate buckets", () => {
@@ -135,6 +167,20 @@ test("parseUsageLimits normalizes default and additional usage buckets", () => {
       primary: { usedPercent: 88, windowMinutes: 30, resetsAt: 1_700_001_800 },
     },
   })
+})
+
+test("oauth identity extraction separates user and account ids", () => {
+  const token = oauthToken({ userId: "user-123", accountId: "acct-shared", organizationId: "org-blue" })
+
+  expect(extractUserId(token)).toBe("user-123")
+  expect(extractAccountId(token)).toBe("acct-shared")
+})
+
+test("oauth identity extraction falls back to organization for account id", () => {
+  const token = oauthToken({ userId: "user-123", organizationId: "org-shared", refreshToken: "refresh-only-org" })
+
+  expect(extractUserId(token)).toBe("user-123")
+  expect(extractAccountId(token)).toBe("org-shared")
 })
 
 test("loadStore migrates accounts without structured limits", async () => {
@@ -399,6 +445,109 @@ test("account manager rename updates stored label", async () => {
     const mgr = await AccountManager.load(client())
     await mgr.rename(0, "after")
     clear(mgr)
+
+    expect((await loadStore()).accounts[0]?.label).toBe("after")
+  } finally {
+    await done()
+  }
+})
+
+test("account manager load migrates missing user ids from tokens", async () => {
+  const done = await setup()
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [
+        account("legacy", {}, DEFAULT_LIMIT_ID, {
+          accessToken: oauthToken({ userId: "user-123", accountId: "acct-shared", organizationId: "org-blue" }).access_token,
+        }),
+      ],
+    })
+
+    const mgr = await AccountManager.load(client())
+    clear(mgr)
+
+    expect((await loadStore()).accounts[0]).toMatchObject({
+      userId: "user-123",
+      accountId: "acct-shared",
+    })
+  } finally {
+    await done()
+  }
+})
+
+test("account manager keeps same user in different workspaces separate on add", async () => {
+  const done = await setup()
+  const prev = globalThis.fetch
+  try {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as typeof fetch
+
+    const mgr = await AccountManager.load(client())
+    await mgr.add(oauthToken({ userId: "user-shared", accountId: "acct-blue", organizationId: "org-blue", refreshToken: "shared-refresh" }), "blue")
+    await mgr.add(oauthToken({ userId: "user-shared", accountId: "acct-red", organizationId: "org-red", refreshToken: "shared-refresh" }), "red")
+    clear(mgr)
+
+    expect((await loadStore()).accounts.map((item) => ({ label: item.label, userId: item.userId, accountId: item.accountId }))).toEqual([
+      { label: "blue", userId: "user-shared", accountId: "acct-blue" },
+      { label: "red", userId: "user-shared", accountId: "acct-red" },
+    ])
+  } finally {
+    globalThis.fetch = prev
+    await done()
+  }
+})
+
+test("account manager keeps sequential renames isolated per workspace user", async () => {
+  const done = await setup()
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [
+        account("before-one", {}, DEFAULT_LIMIT_ID, {
+          userId: "user-blue",
+          accountId: "workspace-team",
+          refreshToken: "shared-refresh",
+        }),
+        account("before-two", {}, DEFAULT_LIMIT_ID, {
+          userId: "user-red",
+          accountId: "workspace-team",
+          refreshToken: "shared-refresh",
+        }),
+      ],
+    })
+
+    const mgr = await AccountManager.load(client())
+    await mgr.rename(0, "after-one")
+    await mgr.rename(1, "after-two")
+    clear(mgr)
+
+    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["after-one", "after-two"])
+  } finally {
+    await done()
+  }
+})
+
+test("stale manager save does not overwrite renamed label", async () => {
+  const done = await setup()
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("before", {})],
+    })
+
+    const first = await AccountManager.load(client())
+    const stale = await AccountManager.load(client())
+
+    stale.markRateLimited(0)
+    await first.rename(0, "after")
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    clear(first)
+    clear(stale)
 
     expect((await loadStore()).accounts[0]?.label).toBe("after")
   } finally {

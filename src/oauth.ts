@@ -22,11 +22,22 @@ export type TokenResponse = {
 
 export type Claims = {
   email?: string
+  chatgpt_user_id?: string
   chatgpt_account_id?: string
+  user_id?: string
+  organization_id?: string
   organizations?: Array<{ id?: string }>
   "https://api.openai.com/auth"?: {
+    chatgpt_user_id?: string
     chatgpt_account_id?: string
+    user_id?: string
+    organization_id?: string
   }
+}
+
+export type TokenIdentity = {
+  userId?: string
+  accountId?: string
 }
 
 function rand(n: number) {
@@ -164,10 +175,45 @@ export function parseJwtClaims(token: string | undefined) {
   }
 }
 
+function pickClaim<T>(...values: Array<T | undefined>) {
+  return values.find((value) => value !== undefined)
+}
+
+export function extractAccountIdentity(tokens: Pick<TokenResponse, "id_token" | "access_token">): TokenIdentity {
+  const idClaims = parseJwtClaims(tokens.id_token)
+  const accessClaims = parseJwtClaims(tokens.access_token)
+  return {
+    userId: pickClaim(
+      idClaims?.["https://api.openai.com/auth"]?.chatgpt_user_id,
+      idClaims?.["https://api.openai.com/auth"]?.user_id,
+      idClaims?.chatgpt_user_id,
+      idClaims?.user_id,
+      accessClaims?.["https://api.openai.com/auth"]?.chatgpt_user_id,
+      accessClaims?.["https://api.openai.com/auth"]?.user_id,
+      accessClaims?.chatgpt_user_id,
+      accessClaims?.user_id,
+    ),
+    accountId: pickClaim(
+      idClaims?.["https://api.openai.com/auth"]?.chatgpt_account_id,
+      idClaims?.chatgpt_account_id,
+      accessClaims?.["https://api.openai.com/auth"]?.chatgpt_account_id,
+      accessClaims?.chatgpt_account_id,
+      idClaims?.["https://api.openai.com/auth"]?.organization_id,
+      idClaims?.organization_id,
+      idClaims?.organizations?.[0]?.id,
+      accessClaims?.["https://api.openai.com/auth"]?.organization_id,
+      accessClaims?.organization_id,
+      accessClaims?.organizations?.[0]?.id,
+    ),
+  }
+}
+
 export function extractAccountId(tokens: Pick<TokenResponse, "id_token" | "access_token">) {
-  const claims = parseJwtClaims(tokens.id_token) ?? parseJwtClaims(tokens.access_token)
-  if (!claims) return
-  return claims.chatgpt_account_id || claims["https://api.openai.com/auth"]?.chatgpt_account_id || claims.organizations?.[0]?.id
+  return extractAccountIdentity(tokens).accountId
+}
+
+export function extractUserId(tokens: Pick<TokenResponse, "id_token" | "access_token">) {
+  return extractAccountIdentity(tokens).userId
 }
 
 export function extractEmail(tokens: Pick<TokenResponse, "id_token" | "access_token">) {

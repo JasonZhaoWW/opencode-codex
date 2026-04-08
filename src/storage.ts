@@ -47,6 +47,7 @@ async function lock(dir: string) {
 const Account = z.object({
   label: z.string(),
   email: z.string().optional(),
+  userId: z.string().optional(),
   refreshToken: z.string(),
   accessToken: z.string(),
   tokenExpires: z.number().int().nonnegative(),
@@ -68,6 +69,31 @@ const Store = z.object({
 export type Account = z.infer<typeof Account>
 export type Store = z.infer<typeof Store>
 
+function emptyStore(): Store {
+  return {
+    version: 1,
+    activeIndex: 0,
+    accounts: [],
+  }
+}
+
+async function readStore(file: string): Promise<Store> {
+  try {
+    await access(file)
+    const text = await readFile(file, "utf8")
+    return Store.parse(JSON.parse(text))
+  } catch {
+    return emptyStore()
+  }
+}
+
+async function writeStore(file: string, store: Store) {
+  const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`
+  await writeFile(tmp, JSON.stringify(store, null, 2) + "\n", "utf8")
+  await chmod(tmp, 0o600)
+  await rename(tmp, file)
+}
+
 export function getConfigDir() {
   if (process.env.OPENCODE_CONFIG_DIR) return process.env.OPENCODE_CONFIG_DIR
   const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
@@ -79,18 +105,7 @@ export function getAccountsPath() {
 }
 
 export async function loadStore(): Promise<Store> {
-  const file = getAccountsPath()
-  try {
-    await access(file)
-    const text = await readFile(file, "utf8")
-    return Store.parse(JSON.parse(text))
-  } catch {
-    return {
-      version: 1,
-      activeIndex: 0,
-      accounts: [],
-    }
-  }
+  return readStore(getAccountsPath())
 }
 
 export async function saveStore(store: Store) {
@@ -99,10 +114,22 @@ export async function saveStore(store: Store) {
   await mkdir(dir, { recursive: true })
   const release = await lock(dir)
   try {
-    const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`
-    await writeFile(tmp, JSON.stringify(store, null, 2) + "\n", "utf8")
-    await chmod(tmp, 0o600)
-    await rename(tmp, file)
+    await writeStore(file, store)
+  } finally {
+    await release()
+  }
+}
+
+export async function updateStore(mutator: (store: Store) => void | Promise<void>) {
+  const file = getAccountsPath()
+  const dir = dirname(file)
+  await mkdir(dir, { recursive: true })
+  const release = await lock(dir)
+  try {
+    const store = await readStore(file)
+    await mutator(store)
+    await writeStore(file, store)
+    return store
   } finally {
     await release()
   }
