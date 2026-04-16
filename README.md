@@ -2,6 +2,9 @@
 
 Multi-account ChatGPT Codex auth plugin for OpenCode.
 
+> [!IMPORTANT]
+> `opencode-codex` is an unofficial community project. It is not built by the OpenCode team and is not affiliated with OpenCode.
+
 `opencode-codex` lets OpenCode treat the built-in `openai` OAuth flow as a Codex subscription path with managed multi-account rotation.
 
 ## Install
