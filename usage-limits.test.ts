@@ -10,7 +10,7 @@ import { parseLimitFailure, parseLimitHeaders, parseUsageLimits } from "./src/li
 import { buildCodexModels } from "./src/models.js"
 import { extractAccountId, extractPlanType, extractUserId } from "./src/oauth.js"
 import { CodexMultiAuthPlugin } from "./src/plugin.js"
-import { getAccountsPath, loadStore, saveStore, type Account } from "./src/storage.js"
+import { getAccountsPath, loadStore, saveStore, saveStoreReconciled, type Account, type Store } from "./src/storage.js"
 import { ANSI } from "./src/ui/ansi.js"
 import { measureMenuItemRows, styleDetailLine, visibleMenuWindow } from "./src/ui/select.js"
 
@@ -46,6 +46,18 @@ function account(label: string, limits: Account["limits"], activeLimitId = DEFAU
     limits,
     ...extra,
   }
+}
+
+function store(accounts: Account[], activeIndex = 0): Store {
+  return {
+    version: 1,
+    activeIndex,
+    accounts,
+  }
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 function clear(mgr: AccountManager) {
@@ -204,7 +216,7 @@ test("loadStore migrates accounts without structured limits", async () => {
           lastUsed: 0,
           enabled: true,
           usage: { requestCount: 3, inputTokens: 9 },
-        } as Account,
+        } as unknown as Account,
       ],
     }
     await writeFile(getAccountsPath(), JSON.stringify(old), "utf8")
@@ -518,7 +530,7 @@ test("account manager keeps same user in different workspaces separate on add", 
   try {
     globalThis.fetch = (async () => {
       throw new Error("offline")
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const mgr = await AccountManager.load(client())
     await mgr.add(oauthToken({ userId: "user-shared", accountId: "acct-blue", organizationId: "org-blue", refreshToken: "shared-refresh" }), "blue")
@@ -585,6 +597,194 @@ test("stale manager save does not overwrite renamed label", async () => {
     clear(stale)
 
     expect((await loadStore()).accounts[0]?.label).toBe("after")
+  } finally {
+    await done()
+  }
+})
+
+test("direct stale snapshot saves preserve unrelated account updates", async () => {
+  const done = await setup()
+  const prev = globalThis.fetch
+  try {
+    await saveStore(store([
+      account("ready", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
+    ]))
+
+    globalThis.fetch = (async () => {
+      return new Response(
+        JSON.stringify({
+          rate_limit: {
+            primary_window: {
+              used_percent: 42,
+              limit_window_seconds: 18_000,
+              reset_at: 1_700_000_000,
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      )
+    }) as unknown as typeof fetch
+
+    const first = await AccountManager.load(client())
+    const stale = await AccountManager.load(client())
+
+    await first.toggle(0)
+    await stale.quota(0)
+    clear(first)
+    clear(stale)
+
+    expect((await loadStore()).accounts[0]).toMatchObject({
+      enabled: false,
+      limits: {
+        codex: {
+          primary: { usedPercent: 42 },
+        },
+      },
+    })
+  } finally {
+    globalThis.fetch = prev
+    await done()
+  }
+})
+
+test("stale manager add preserves concurrently added accounts", async () => {
+  const done = await setup()
+  const prev = globalThis.fetch
+  try {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+
+    const first = await AccountManager.load(client())
+    const stale = await AccountManager.load(client())
+
+    await first.add(oauthToken({ userId: "user-blue", accountId: "acct-blue", refreshToken: "refresh-blue" }), "blue")
+    await stale.add(oauthToken({ userId: "user-red", accountId: "acct-red", refreshToken: "refresh-red" }), "red")
+    clear(first)
+    clear(stale)
+
+    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["blue", "red"])
+  } finally {
+    globalThis.fetch = prev
+    await done()
+  }
+})
+
+test("ensureFromAuth does not add a stale primary account over a newer store", async () => {
+  const done = await setup()
+  const prev = globalThis.fetch
+  try {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+
+    const stale = await AccountManager.load(client())
+    const first = await AccountManager.load(client())
+
+    await first.add(oauthToken({ userId: "user-blue", accountId: "acct-blue", refreshToken: "refresh-blue" }), "blue")
+    await stale.ensureFromAuth({
+      type: "oauth",
+      refresh: "refresh-primary",
+      access: "access-primary",
+      expires: Date.now() + 60_000,
+      accountId: "acct-primary",
+    })
+    clear(first)
+    clear(stale)
+
+    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["blue"])
+  } finally {
+    globalThis.fetch = prev
+    await done()
+  }
+})
+
+test("reconciled save matches updates by identity after concurrent insertion", async () => {
+  const done = await setup()
+  try {
+    const base = store([
+      account("before", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
+      account("other", {}, DEFAULT_LIMIT_ID, { userId: "user-2", accountId: "acct-2" }),
+    ])
+    const inserted = clone(base)
+    inserted.accounts.unshift(account("inserted", {}, DEFAULT_LIMIT_ID, { userId: "user-0", accountId: "acct-0" }))
+    inserted.activeIndex = 1
+    const renamed = clone(base)
+    renamed.accounts[0]!.label = "after"
+
+    await saveStore(base)
+    await saveStoreReconciled(base, inserted)
+    await saveStoreReconciled(base, renamed)
+
+    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["inserted", "after", "other"])
+  } finally {
+    await done()
+  }
+})
+
+test("reconciled save does not recreate removed accounts when stale snapshots update survivors", async () => {
+  const done = await setup()
+  try {
+    const base = store([
+      account("remove-me", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
+      account("keep", {}, DEFAULT_LIMIT_ID, { userId: "user-2", accountId: "acct-2" }),
+    ])
+    const removed = clone(base)
+    removed.accounts.splice(0, 1)
+    removed.activeIndex = 0
+    const renamed = clone(base)
+    renamed.accounts[1]!.label = "kept"
+
+    await saveStore(base)
+    await saveStoreReconciled(base, removed)
+    await saveStoreReconciled(base, renamed)
+
+    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["kept"])
+  } finally {
+    await done()
+  }
+})
+
+test("reconciled save prefers identity over shared refresh tokens", async () => {
+  const done = await setup()
+  try {
+    const base = store([
+      account("blue", {}, DEFAULT_LIMIT_ID, { userId: "user-shared", accountId: "acct-blue", refreshToken: "shared-refresh" }),
+      account("red", {}, DEFAULT_LIMIT_ID, { userId: "user-shared", accountId: "acct-red", refreshToken: "shared-refresh" }),
+    ])
+    const removed = clone(base)
+    removed.accounts.splice(0, 1)
+    removed.activeIndex = 0
+
+    await saveStore(base)
+    await saveStoreReconciled(base, removed)
+
+    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["red"])
+  } finally {
+    await done()
+  }
+})
+
+test("reconciled save keeps last writer for conflicting fields only", async () => {
+  const done = await setup()
+  try {
+    const base = store([
+      account("before", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
+    ])
+    const first = clone(base)
+    first.accounts[0]!.label = "first"
+    first.accounts[0]!.enabled = false
+    const second = clone(base)
+    second.accounts[0]!.label = "second"
+
+    await saveStore(base)
+    await saveStoreReconciled(base, first)
+    await saveStoreReconciled(base, second)
+
+    expect((await loadStore()).accounts[0]).toMatchObject({ label: "second", enabled: false })
   } finally {
     await done()
   }
@@ -737,7 +937,7 @@ test("oauth auth loader still returns codex transport options without replacing 
   try {
     globalThis.fetch = (async () => {
       throw new Error("offline")
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const out = await hooks.auth?.loader?.(
       async () => ({ type: "oauth", refresh: "r", access: "a", expires: Date.now() + 60_000 }),

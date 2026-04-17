@@ -2,7 +2,7 @@ import type { PluginInput } from "@opencode-ai/plugin"
 import { DEFAULT_LIMIT_ID, DEFAULT_LIMIT_MS, LIMIT_STALE_MS } from "./constants.js"
 import { fetchUsageLimits, limitBlocked, limitReset, normalizeLimitId, type LimitMap } from "./limits.js"
 import { accessExpired, extractAccountIdentity, extractEmail, refreshAccessToken, tokenExpires, type TokenIdentity, type TokenResponse } from "./oauth.js"
-import { loadStore, saveStore, updateStore, type Account, type Store } from "./storage.js"
+import { loadStore, saveStoreReconciled, updateStore, type Account, type Store } from "./storage.js"
 
 type Client = PluginInput["client"]
 
@@ -14,6 +14,10 @@ type RawClient = {
 
 function now() {
   return Date.now()
+}
+
+function cloneStore(store: Store) {
+  return JSON.parse(JSON.stringify(store)) as Store
 }
 
 function applyIdentity(acc: Account, identity: TokenIdentity) {
@@ -45,11 +49,12 @@ export class AccountManager {
 
   static async load(client: Client) {
     const store = await loadStore()
+    const previous = cloneStore(store)
     const changed = store.accounts.reduce((hit, acc) => {
       return applyIdentity(acc, extractAccountIdentity({ access_token: acc.accessToken })) || hit
     }, false)
-    if (changed) await saveStore(store)
-    return new AccountManager(store, client)
+    const current = changed ? await saveStoreReconciled(previous, store) : store
+    return new AccountManager(current, client)
   }
 
   list() {
@@ -64,20 +69,24 @@ export class AccountManager {
     if (auth.type !== "oauth") return
     if (this.store.accounts.length > 0) return
     if (!auth.refresh || !auth.access || !auth.expires) return
-    this.store.accounts.push({
-      label: "primary",
-      refreshToken: auth.refresh,
-      accessToken: auth.access,
-      tokenExpires: auth.expires,
-      accountId: auth.accountId,
-      addedAt: now(),
+    let seeded = false
+    this.store = await updateStore((store) => {
+      if (store.accounts.length > 0) return
+      store.accounts.push({
+        label: "primary",
+        refreshToken: auth.refresh!,
+        accessToken: auth.access!,
+        tokenExpires: auth.expires!,
+        accountId: auth.accountId,
+        addedAt: now(),
         lastUsed: 0,
         enabled: true,
         activeLimitId: DEFAULT_LIMIT_ID,
         limits: {},
       })
-    await saveStore(this.store)
-    await this.hydrate(0).catch(() => undefined)
+      seeded = true
+    })
+    if (seeded) await this.hydrate(0).catch(() => undefined)
   }
 
   private active(acc: Account) {
@@ -108,6 +117,11 @@ export class AccountManager {
       if (byRefreshToken >= 0) return byRefreshToken
     }
     return -1
+  }
+
+  private async persistStore(previous: Store) {
+    this.store = await saveStoreReconciled(previous, this.store)
+    return this.store
   }
 
   private mergeBackgroundState(store: Store) {
@@ -240,14 +254,17 @@ export class AccountManager {
   async quota(index: number) {
     const acc = this.store.accounts[index]
     if (!acc) throw new Error("Missing account")
+    const previous = cloneStore(this.store)
     const limits = await fetchUsageLimits(acc.accessToken, acc.accountId)
     this.captureLimits(index, limits, undefined, true)
     clearTimeout(this.saveTimer)
-    await saveStore(this.store)
-    return this.store.accounts[index]
+    await this.persistStore(previous)
+    const hit = this.matchAccountIndex(this.store.accounts, acc, index)
+    return hit >= 0 ? this.store.accounts[hit] : undefined
   }
 
   async add(token: TokenResponse, label: string) {
+    const previous = cloneStore(this.store)
     const acc: Account = {
       label,
       email: extractEmail(token),
@@ -265,25 +282,28 @@ export class AccountManager {
     if (hit >= 0) this.store.accounts[hit] = { ...this.store.accounts[hit]!, ...acc }
     else this.store.accounts.push(acc)
     if (this.store.accounts.length === 1) this.store.activeIndex = 0
-    await saveStore(this.store)
+    await this.persistStore(previous)
     await this.sync()
-    await this.hydrate(hit >= 0 ? hit : this.store.accounts.length - 1).catch(() => undefined)
+    const savedIndex = this.findExistingAccountIndex(acc)
+    await this.hydrate(savedIndex >= 0 ? savedIndex : this.store.accounts.length - 1).catch(() => undefined)
     return acc
   }
 
   async remove(index: number) {
     if (index < 0 || index >= this.store.accounts.length) return
+    const previous = cloneStore(this.store)
     this.store.accounts.splice(index, 1)
     if (this.store.activeIndex >= this.store.accounts.length) this.store.activeIndex = Math.max(0, this.store.accounts.length - 1)
-    await saveStore(this.store)
+    await this.persistStore(previous)
     await this.sync()
   }
 
   async toggle(index: number) {
     const acc = this.store.accounts[index]
     if (!acc) return
+    const previous = cloneStore(this.store)
     acc.enabled = !acc.enabled
-    await saveStore(this.store)
+    await this.persistStore(previous)
     await this.sync()
   }
 

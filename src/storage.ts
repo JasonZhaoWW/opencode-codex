@@ -70,6 +70,109 @@ const Store = z.object({
 export type Account = z.infer<typeof Account>
 export type Store = z.infer<typeof Store>
 
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function sameValue(left: unknown, right: unknown) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function matchAccountIndex(accounts: Account[], current: Account, fallback: number, used = new Set<number>()) {
+  const byIdentity = current.userId && current.accountId
+    ? accounts.findIndex((acc, index) => !used.has(index) && acc.userId === current.userId && acc.accountId === current.accountId)
+    : -1
+  if (byIdentity >= 0) return byIdentity
+  if (current.userId && current.accountId) return -1
+  const byRefreshToken = !current.userId && !current.accountId && current.refreshToken
+    ? accounts.findIndex((acc, index) => !used.has(index) && acc.refreshToken === current.refreshToken)
+    : -1
+  if (byRefreshToken >= 0) return byRefreshToken
+  return fallback >= 0 && fallback < accounts.length && !used.has(fallback) ? fallback : -1
+}
+
+function updateAccount(target: Account, previous: Account, next: Account) {
+  const keys = new Set<keyof Account>([
+    ...Object.keys(previous),
+    ...Object.keys(next),
+  ] as Array<keyof Account>)
+  // Conflicts are resolved per field: the write that persists later wins only for
+  // the fields it changed, while unrelated fields from earlier writes stay intact.
+  for (const key of keys) {
+    if (sameValue(previous[key], next[key])) continue
+    const value = next[key]
+    if (value === undefined) delete (target as Record<string, unknown>)[key]
+    else (target as Record<string, unknown>)[key] = clone(value)
+  }
+}
+
+function insertAccountIndex(merged: Store, next: Store, usedNext: Set<number>, nextIndex: number) {
+  for (let index = nextIndex + 1; index < next.accounts.length; index++) {
+    if (!usedNext.has(index)) continue
+    const anchor = next.accounts[index]
+    if (!anchor) continue
+    const hit = matchAccountIndex(merged.accounts, anchor, -1)
+    if (hit >= 0) return hit
+  }
+  for (let index = nextIndex - 1; index >= 0; index--) {
+    if (!usedNext.has(index)) continue
+    const anchor = next.accounts[index]
+    if (!anchor) continue
+    const hit = matchAccountIndex(merged.accounts, anchor, -1)
+    if (hit >= 0) return hit + 1
+  }
+  return merged.accounts.length
+}
+
+function mergeStore(latest: Store, previous: Store, next: Store) {
+  const merged = clone(latest)
+  const nextByPrevious = new Map<number, number>()
+  const usedNext = new Set<number>()
+
+  for (const [index, account] of previous.accounts.entries()) {
+    const hit = matchAccountIndex(next.accounts, account, index, usedNext)
+    if (hit < 0) continue
+    nextByPrevious.set(index, hit)
+    usedNext.add(hit)
+  }
+
+  for (const [previousIndex, nextIndex] of nextByPrevious.entries()) {
+    const previousAccount = previous.accounts[previousIndex]
+    const nextAccount = next.accounts[nextIndex]
+    if (!previousAccount || !nextAccount) continue
+    const targetIndex = matchAccountIndex(merged.accounts, previousAccount, previousIndex)
+    if (targetIndex < 0) continue
+    updateAccount(merged.accounts[targetIndex]!, previousAccount, nextAccount)
+  }
+
+  for (const [previousIndex, previousAccount] of previous.accounts.entries()) {
+    if (nextByPrevious.has(previousIndex)) continue
+    const targetIndex = matchAccountIndex(merged.accounts, previousAccount, previousIndex)
+    if (targetIndex >= 0) merged.accounts.splice(targetIndex, 1)
+  }
+
+  for (const [nextIndex, nextAccount] of next.accounts.entries()) {
+    if (usedNext.has(nextIndex)) continue
+    const targetIndex = matchAccountIndex(merged.accounts, nextAccount, -1)
+    if (targetIndex >= 0) merged.accounts[targetIndex] = { ...merged.accounts[targetIndex]!, ...clone(nextAccount) }
+    else merged.accounts.splice(insertAccountIndex(merged, next, usedNext, nextIndex), 0, clone(nextAccount))
+  }
+
+  if (previous.activeIndex !== next.activeIndex) {
+    const active = next.accounts[next.activeIndex]
+    if (!active) merged.activeIndex = 0
+    else {
+      const hit = matchAccountIndex(merged.accounts, active, next.activeIndex)
+      if (hit >= 0) merged.activeIndex = hit
+    }
+  }
+
+  if (merged.accounts.length === 0) merged.activeIndex = 0
+  else merged.activeIndex = Math.max(0, Math.min(merged.activeIndex, merged.accounts.length - 1))
+
+  return merged
+}
+
 function emptyStore(): Store {
   return {
     version: 1,
@@ -116,6 +219,21 @@ export async function saveStore(store: Store) {
   const release = await lock(dir)
   try {
     await writeStore(file, store)
+  } finally {
+    await release()
+  }
+}
+
+export async function saveStoreReconciled(previous: Store, next: Store) {
+  const file = getAccountsPath()
+  const dir = dirname(file)
+  await mkdir(dir, { recursive: true })
+  const release = await lock(dir)
+  try {
+    const latest = await readStore(file)
+    const merged = mergeStore(latest, previous, next)
+    await writeStore(file, merged)
+    return merged
   } finally {
     await release()
   }
