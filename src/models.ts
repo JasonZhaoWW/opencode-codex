@@ -63,7 +63,9 @@ function variants(...list: Effort[]) {
 function date(id: string) {
   if (id === "gpt-5.2") return "2025-12-11"
   if (id === "gpt-5.4") return "2026-03-05"
+  if (id === "gpt-5.4-fast") return "2026-03-05"
   if (id === "gpt-5.4-mini") return "2026-03-17"
+  if (id === "gpt-5.4-mini-fast") return "2026-03-17"
 }
 
 export const CODEX_MODEL_TABLE = {
@@ -122,11 +124,29 @@ export const CODEX_MODEL_TABLE = {
       ...variants("none", "low", "medium", "high", "xhigh"),
     },
   },
+  "gpt-5.4-fast": {
+    family: "gpt",
+    limit: { context: 1050000, input: 922000, output: 128000 },
+    modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    name: "GPT-5.4 Fast",
+    variants: {
+      ...variants("none", "low", "medium", "high", "xhigh"),
+    },
+  },
   "gpt-5.4-mini": {
     family: "gpt-mini",
     limit: { context: 400000, input: 272000, output: 128000 },
     modalities: { input: ["text", "image"], output: ["text"] },
     name: "GPT-5.4 mini",
+    variants: {
+      ...variants("none", "low", "medium", "high", "xhigh"),
+    },
+  },
+  "gpt-5.4-mini-fast": {
+    family: "gpt-mini",
+    limit: { context: 400000, input: 272000, output: 128000 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    name: "GPT-5.4 mini Fast",
     variants: {
       ...variants("none", "low", "medium", "high", "xhigh"),
     },

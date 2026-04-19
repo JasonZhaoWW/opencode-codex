@@ -30,7 +30,7 @@ function final(id: string, model: ReturnType<typeof buildCodexModels>[string]) {
   })
 }
 
-test("buildCodexModels exposes the seven maintained models", () => {
+test("buildCodexModels exposes the nine maintained models", () => {
   const models = buildCodexModels()
 
   expect(keys(models)).toEqual([
@@ -40,7 +40,9 @@ test("buildCodexModels exposes the seven maintained models", () => {
     "gpt-5.2-codex",
     "gpt-5.3-codex",
     "gpt-5.4",
+    "gpt-5.4-fast",
     "gpt-5.4-mini",
+    "gpt-5.4-mini-fast",
   ])
 })
 
@@ -55,7 +57,9 @@ test("buildCodexModels encodes scoped variant menus", () => {
   expect(keys(get(models, "gpt-5.2-codex").variants)).toEqual(["high", "low", "medium", "xhigh"])
   expect(keys(get(models, "gpt-5.3-codex").variants)).toEqual(["high", "low", "medium", "xhigh"])
   expect(keys(get(models, "gpt-5.4").variants)).toEqual(["high", "low", "medium", "none", "xhigh"])
+  expect(keys(get(models, "gpt-5.4-fast").variants)).toEqual(["high", "low", "medium", "none", "xhigh"])
   expect(keys(get(models, "gpt-5.4-mini").variants)).toEqual(["high", "low", "medium", "none", "xhigh"])
+  expect(keys(get(models, "gpt-5.4-mini-fast").variants)).toEqual(["high", "low", "medium", "none", "xhigh"])
 })
 
 test("buildCodexModels carries the release dates needed for final OpenCode ordering", () => {
@@ -63,7 +67,9 @@ test("buildCodexModels carries the release dates needed for final OpenCode order
 
   expect(get(models, "gpt-5.2").release_date).toBe("2025-12-11")
   expect(get(models, "gpt-5.4").release_date).toBe("2026-03-05")
+  expect(get(models, "gpt-5.4-fast").release_date).toBe("2026-03-05")
   expect(get(models, "gpt-5.4-mini").release_date).toBe("2026-03-17")
+  expect(get(models, "gpt-5.4-mini-fast").release_date).toBe("2026-03-17")
 })
 
 test("buildCodexModels leaves the unselected default path untouched", () => {
@@ -80,7 +86,21 @@ test("final visible variants put none before low where supported", () => {
 
   expect(final("gpt-5.2", get(models, "gpt-5.2"))).toEqual(["none", "low", "medium", "high", "xhigh"])
   expect(final("gpt-5.4", get(models, "gpt-5.4"))).toEqual(["none", "low", "medium", "high", "xhigh"])
+  expect(final("gpt-5.4-fast", get(models, "gpt-5.4-fast"))).toEqual([
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ])
   expect(final("gpt-5.4-mini", get(models, "gpt-5.4-mini"))).toEqual([
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ])
+  expect(final("gpt-5.4-mini-fast", get(models, "gpt-5.4-mini-fast"))).toEqual([
     "none",
     "low",
     "medium",
