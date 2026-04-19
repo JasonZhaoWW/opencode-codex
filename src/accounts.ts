@@ -248,10 +248,18 @@ export class AccountManager {
   }
 
   async quota(index: number) {
-    const acc = this.store.accounts[index]
+    let hit = index
+    let acc = this.store.accounts[hit]
     if (!acc) throw new Error("Missing account")
-    const limits = await fetchUsageLimits(acc.accessToken, acc.accountId)
-    const hit = await this.captureLimits(index, limits, undefined, true)
+    if (accessExpired(acc.tokenExpires)) {
+      acc = await this.refresh(hit, false)
+      hit = this.findCurrentIndex(acc, hit)
+    }
+    if (hit < 0) throw new Error("Missing account")
+    const current = this.store.accounts[hit]
+    if (!current) throw new Error("Missing account")
+    const limits = await fetchUsageLimits(current.accessToken, current.accountId)
+    hit = await this.captureLimits(hit, limits, undefined, true)
     return hit >= 0 ? this.store.accounts[hit] : undefined
   }
 

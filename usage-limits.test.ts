@@ -38,7 +38,7 @@ function account(label: string, limits: Account["limits"], activeLimitId = DEFAU
     label,
     refreshToken: `${label}-refresh`,
     accessToken: `${label}-access`,
-    tokenExpires: Date.now() + 60_000,
+    tokenExpires: Date.now() + 3_600_000,
     addedAt: Date.now(),
     lastUsed: 0,
     enabled: true,
@@ -718,6 +718,115 @@ test("account manager quota refresh updates limits without rotating tokens", asy
     expect(hit?.accessToken).toBe("ready-access")
     expect(hit?.refreshToken).toBe("ready-refresh")
     expect(hit?.limits.codex?.primary?.usedPercent).toBe(42)
+  } finally {
+    globalThis.fetch = prev
+    await done()
+  }
+})
+
+test("account manager quota refreshes expired access tokens first", async () => {
+  const done = await setup()
+  const prev = globalThis.fetch
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("expired", {}, DEFAULT_LIMIT_ID, { accountId: "acct_123", tokenExpires: Date.now() - 60_000 })],
+    })
+
+    const calls: string[] = []
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.endsWith("/oauth/token")) {
+        expect(init?.method).toBe("POST")
+        expect(String(init?.body)).toContain("grant_type=refresh_token")
+        expect(String(init?.body)).toContain("refresh_token=expired-refresh")
+        return new Response(
+          JSON.stringify({
+            access_token: "fresh-access",
+            refresh_token: "fresh-refresh",
+            expires_in: 3600,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        )
+      }
+
+      expect(url).toBe("https://chatgpt.com/backend-api/wham/usage")
+      const headers = new Headers(init?.headers)
+      expect(headers.get("authorization")).toBe("Bearer fresh-access")
+      expect(headers.get("ChatGPT-Account-Id")).toBe("acct_123")
+      return new Response(
+        JSON.stringify({
+          rate_limit: {
+            primary_window: {
+              used_percent: 42,
+              limit_window_seconds: 18_000,
+              reset_at: 1_700_000_000,
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      )
+    }) as typeof fetch
+
+    const mgr = await AccountManager.load(client())
+    await mgr.quota(0)
+    clear(mgr)
+
+    const hit = (await loadStore()).accounts[0]
+    expect(calls).toEqual([
+      "https://auth.openai.com/oauth/token",
+      "https://chatgpt.com/backend-api/wham/usage",
+    ])
+    expect(hit?.accessToken).toBe("fresh-access")
+    expect(hit?.refreshToken).toBe("fresh-refresh")
+    expect(hit?.limits.codex?.primary?.usedPercent).toBe(42)
+  } finally {
+    globalThis.fetch = prev
+    await done()
+  }
+})
+
+test("account manager quota disables expired accounts when refresh fails", async () => {
+  const done = await setup()
+  const prev = globalThis.fetch
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("expired", {}, DEFAULT_LIMIT_ID, { accountId: "acct_123", tokenExpires: Date.now() - 60_000 })],
+    })
+
+    const calls: string[] = []
+    globalThis.fetch = (async (input) => {
+      const url = String(input)
+      calls.push(url)
+      expect(url).toBe("https://auth.openai.com/oauth/token")
+      return new Response("", { status: 401 })
+    }) as typeof fetch
+
+    const mgr = await AccountManager.load(client())
+
+    let error: unknown
+    try {
+      await mgr.quota(0)
+    } catch (err) {
+      error = err
+    }
+    clear(mgr)
+
+    const hit = (await loadStore()).accounts[0]
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe("Token refresh failed: 401")
+    expect(calls).toEqual(["https://auth.openai.com/oauth/token"])
+    expect(hit?.enabled).toBe(false)
   } finally {
     globalThis.fetch = prev
     await done()
