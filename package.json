@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "prepack": "bun run typecheck && bun test && bun run build"
   },

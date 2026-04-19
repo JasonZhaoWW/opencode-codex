@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 
-import { buildCodexModels } from "./src/models.js"
+import { buildCodexModels } from "../../src/models.js"
 
 function keys(input?: Record<string, unknown>) {
   return Object.keys(input ?? {}).sort()
