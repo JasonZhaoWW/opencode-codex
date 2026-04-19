@@ -10,7 +10,7 @@ import { parseLimitFailure, parseLimitHeaders, parseUsageLimits } from "./src/li
 import { buildCodexModels } from "./src/models.js"
 import { extractAccountId, extractPlanType, extractUserId } from "./src/oauth.js"
 import { CodexMultiAuthPlugin } from "./src/plugin.js"
-import { getAccountsPath, loadStore, saveStore, saveStoreReconciled, type Account, type Store } from "./src/storage.js"
+import { getAccountsDbPath, loadStore, saveStore, type Account, type Store } from "./src/storage.js"
 import { ANSI } from "./src/ui/ansi.js"
 import { measureMenuItemRows, styleDetailLine, visibleMenuWindow } from "./src/ui/select.js"
 
@@ -56,12 +56,8 @@ function store(accounts: Account[], activeIndex = 0): Store {
   }
 }
 
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
-}
-
 function clear(mgr: AccountManager) {
-  clearTimeout((mgr as unknown as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer)
+  void mgr
 }
 
 function jwt(payload: Record<string, unknown>) {
@@ -200,49 +196,6 @@ test("oauth identity extraction falls back to organization for account id", () =
   expect(extractAccountId(token)).toBe("org-shared")
 })
 
-test("loadStore migrates accounts without structured limits", async () => {
-  const done = await setup()
-  try {
-    const old = {
-      version: 1,
-      activeIndex: 0,
-      accounts: [
-        {
-          label: "legacy",
-          refreshToken: "refresh",
-          accessToken: "access",
-          tokenExpires: 100,
-          addedAt: 1,
-          lastUsed: 0,
-          enabled: true,
-          usage: { requestCount: 3, inputTokens: 9 },
-        } as unknown as Account,
-      ],
-    }
-    await writeFile(getAccountsPath(), JSON.stringify(old), "utf8")
-
-    expect(await loadStore()).toEqual({
-      version: 1,
-      activeIndex: 0,
-      accounts: [
-        {
-          label: "legacy",
-          refreshToken: "refresh",
-          accessToken: "access",
-          tokenExpires: 100,
-          addedAt: 1,
-          lastUsed: 0,
-          enabled: true,
-          activeLimitId: "codex",
-          limits: {},
-        },
-      ],
-    })
-  } finally {
-    await done()
-  }
-})
-
 test("select skips accounts exhausted by primary and secondary windows", async () => {
   const done = await setup()
   try {
@@ -275,9 +228,12 @@ test("select skips accounts exhausted by primary and secondary windows", async (
     const mgr = await AccountManager.load(client())
     const sel = await mgr.select()
     clear(mgr)
+    const saved = await loadStore()
 
     expect(sel.index).toBe(2)
     expect(sel.account.label).toBe("ready")
+    expect(saved.activeIndex).toBe(2)
+    expect(saved.accounts[2]?.lastUsed).toBeGreaterThan(0)
   } finally {
     await done()
   }
@@ -578,7 +534,7 @@ test("account manager keeps sequential renames isolated per workspace user", asy
   }
 })
 
-test("stale manager save does not overwrite renamed label", async () => {
+test("stale manager updates preserve renamed label immediately", async () => {
   const done = await setup()
   try {
     await saveStore({
@@ -590,13 +546,15 @@ test("stale manager save does not overwrite renamed label", async () => {
     const first = await AccountManager.load(client())
     const stale = await AccountManager.load(client())
 
-    stale.markRateLimited(0)
+    await stale.markRateLimited(0)
     await first.rename(0, "after")
-    await new Promise((resolve) => setTimeout(resolve, 1100))
     clear(first)
     clear(stale)
 
-    expect((await loadStore()).accounts[0]?.label).toBe("after")
+    expect((await loadStore()).accounts[0]).toMatchObject({
+      label: "after",
+      rateLimitResetTime: expect.any(Number),
+    })
   } finally {
     await done()
   }
@@ -702,89 +660,19 @@ test("ensureFromAuth does not add a stale primary account over a newer store", a
   }
 })
 
-test("reconciled save matches updates by identity after concurrent insertion", async () => {
+test("loadStore throws on corrupt sqlite database", async () => {
   const done = await setup()
   try {
-    const base = store([
-      account("before", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
-      account("other", {}, DEFAULT_LIMIT_ID, { userId: "user-2", accountId: "acct-2" }),
-    ])
-    const inserted = clone(base)
-    inserted.accounts.unshift(account("inserted", {}, DEFAULT_LIMIT_ID, { userId: "user-0", accountId: "acct-0" }))
-    inserted.activeIndex = 1
-    const renamed = clone(base)
-    renamed.accounts[0]!.label = "after"
+    await writeFile(getAccountsDbPath(), "not-a-sqlite-database", "utf8")
 
-    await saveStore(base)
-    await saveStoreReconciled(base, inserted)
-    await saveStoreReconciled(base, renamed)
+    let error: unknown
+    try {
+      await loadStore()
+    } catch (err) {
+      error = err
+    }
 
-    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["inserted", "after", "other"])
-  } finally {
-    await done()
-  }
-})
-
-test("reconciled save does not recreate removed accounts when stale snapshots update survivors", async () => {
-  const done = await setup()
-  try {
-    const base = store([
-      account("remove-me", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
-      account("keep", {}, DEFAULT_LIMIT_ID, { userId: "user-2", accountId: "acct-2" }),
-    ])
-    const removed = clone(base)
-    removed.accounts.splice(0, 1)
-    removed.activeIndex = 0
-    const renamed = clone(base)
-    renamed.accounts[1]!.label = "kept"
-
-    await saveStore(base)
-    await saveStoreReconciled(base, removed)
-    await saveStoreReconciled(base, renamed)
-
-    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["kept"])
-  } finally {
-    await done()
-  }
-})
-
-test("reconciled save prefers identity over shared refresh tokens", async () => {
-  const done = await setup()
-  try {
-    const base = store([
-      account("blue", {}, DEFAULT_LIMIT_ID, { userId: "user-shared", accountId: "acct-blue", refreshToken: "shared-refresh" }),
-      account("red", {}, DEFAULT_LIMIT_ID, { userId: "user-shared", accountId: "acct-red", refreshToken: "shared-refresh" }),
-    ])
-    const removed = clone(base)
-    removed.accounts.splice(0, 1)
-    removed.activeIndex = 0
-
-    await saveStore(base)
-    await saveStoreReconciled(base, removed)
-
-    expect((await loadStore()).accounts.map((item) => item.label)).toEqual(["red"])
-  } finally {
-    await done()
-  }
-})
-
-test("reconciled save keeps last writer for conflicting fields only", async () => {
-  const done = await setup()
-  try {
-    const base = store([
-      account("before", {}, DEFAULT_LIMIT_ID, { userId: "user-1", accountId: "acct-1" }),
-    ])
-    const first = clone(base)
-    first.accounts[0]!.label = "first"
-    first.accounts[0]!.enabled = false
-    const second = clone(base)
-    second.accounts[0]!.label = "second"
-
-    await saveStore(base)
-    await saveStoreReconciled(base, first)
-    await saveStoreReconciled(base, second)
-
-    expect((await loadStore()).accounts[0]).toMatchObject({ label: "second", enabled: false })
+    expect(error).toBeInstanceOf(Error)
   } finally {
     await done()
   }

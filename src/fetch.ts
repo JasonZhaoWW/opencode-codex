@@ -43,9 +43,9 @@ function rewrite(url: URL) {
   return url
 }
 
-function wrap(res: Response, index: number, mgr: AccountManager) {
+async function wrap(res: Response, index: number, mgr: AccountManager) {
   const limits = parseLimitHeaders(res.headers)
-  if (Object.keys(limits).length > 0) mgr.captureLimits(index, limits, undefined, true)
+  if (Object.keys(limits).length > 0) await mgr.captureLimits(index, limits, undefined, true)
   return res
 }
 
@@ -69,18 +69,18 @@ export function createCodexFetch(mgr: AccountManager) {
     const first = await send(mgr, req)
     if (first.res.status !== 429) return wrap(first.res, first.sel.index, mgr)
     const firstFail = parseLimitFailure(first.res.headers)
-    if (Object.keys(firstFail.limits).length > 0) mgr.captureLimits(first.sel.index, firstFail.limits, firstFail.activeLimitId)
+    if (Object.keys(firstFail.limits).length > 0) await mgr.captureLimits(first.sel.index, firstFail.limits, firstFail.activeLimitId)
     const firstId = normalizeLimitId(firstFail.activeLimitId || first.sel.account.activeLimitId || DEFAULT_LIMIT_ID)
     const firstSnap = firstFail.limits[firstId] || firstFail.limits[DEFAULT_LIMIT_ID]
-    if (!firstSnap || limitReset(firstSnap) === undefined) mgr.markRateLimited(first.sel.index, firstFail.resetAt, firstId)
+    if (!firstSnap || limitReset(firstSnap) === undefined) await mgr.markRateLimited(first.sel.index, firstFail.resetAt, firstId)
     const second = await send(mgr, req, first.sel.index).catch(() => undefined)
     if (!second) throw new Error("All accounts are rate-limited.")
     if (second.res.status === 429) {
       const secondFail = parseLimitFailure(second.res.headers)
-      if (Object.keys(secondFail.limits).length > 0) mgr.captureLimits(second.sel.index, secondFail.limits, secondFail.activeLimitId)
+      if (Object.keys(secondFail.limits).length > 0) await mgr.captureLimits(second.sel.index, secondFail.limits, secondFail.activeLimitId)
       const secondId = normalizeLimitId(secondFail.activeLimitId || second.sel.account.activeLimitId || DEFAULT_LIMIT_ID)
       const secondSnap = secondFail.limits[secondId] || secondFail.limits[DEFAULT_LIMIT_ID]
-      if (!secondSnap || limitReset(secondSnap) === undefined) mgr.markRateLimited(second.sel.index, secondFail.resetAt, secondId)
+      if (!secondSnap || limitReset(secondSnap) === undefined) await mgr.markRateLimited(second.sel.index, secondFail.resetAt, secondId)
       throw new Error("All accounts are rate-limited.")
     }
     return wrap(second.res, second.sel.index, mgr)

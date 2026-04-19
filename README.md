@@ -53,7 +53,7 @@ From the management flow you can:
 - Refresh an account's quota snapshot without rotating tokens
 - Remove an account with confirmation
 
-The plugin stores the full account pool in `~/.config/opencode/codex-accounts.json` and keeps one sentinel OAuth record under the `openai` provider in opencode's `auth.json` so OpenCode uses its built-in Codex-compatible request path.
+The plugin stores the full account pool in `~/.config/opencode/codex-accounts.sqlite` and keeps one sentinel OAuth record under the `openai` provider in opencode's `auth.json` so OpenCode uses its built-in Codex-compatible request path.
 
 The plugin reuses opencode's built-in `openai` provider instead of creating a standalone `codex` provider.
 

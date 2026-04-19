@@ -1,7 +1,7 @@
-import { randomBytes } from "node:crypto"
-import { access, chmod, mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises"
+import { Database } from "bun:sqlite"
+import { mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import z from "zod"
 
 const LimitWindow = z.object({
@@ -17,34 +17,7 @@ const LimitSnapshot = z.object({
   secondary: LimitWindow.optional(),
 })
 
-async function sleep(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function lock(dir: string) {
-  const path = join(dir, ".codex-accounts.lock")
-  let delay = 100
-  for (let i = 0; i <= 5; i++) {
-    try {
-      await mkdir(path)
-      return async () => {
-        await rmdir(path).catch(() => undefined)
-      }
-    } catch {
-      const info = await stat(path).catch(() => undefined)
-      if (info && Date.now() - info.mtimeMs > 10_000) {
-        await rmdir(path).catch(() => undefined)
-        continue
-      }
-      if (i === 5) throw new Error("Failed to acquire storage lock")
-      await sleep(delay)
-      delay = Math.min(delay * 2, 1000)
-    }
-  }
-  throw new Error("Failed to acquire storage lock")
-}
-
-const Account = z.object({
+const AccountSchema = z.object({
   label: z.string(),
   email: z.string().optional(),
   planType: z.string().optional(),
@@ -61,141 +34,233 @@ const Account = z.object({
   rateLimitResetTime: z.number().int().nonnegative().optional(),
 })
 
-const Store = z.object({
+const StoreSchema = z.object({
   version: z.literal(1),
   activeIndex: z.number().int().nonnegative(),
-  accounts: z.array(Account),
+  accounts: z.array(AccountSchema),
 })
 
-export type Account = z.infer<typeof Account>
-export type Store = z.infer<typeof Store>
+type AccountRow = {
+  id: number
+  label: string
+  email: string | null
+  plan_type: string | null
+  user_id: string | null
+  refresh_token: string
+  access_token: string
+  token_expires: number
+  account_id: string | null
+  added_at: number
+  last_used: number
+  enabled: number
+  active_limit_id: string
+  limits_json: string
+  rate_limit_reset_time: number | null
+  position: number
+}
+
+export type Account = z.infer<typeof AccountSchema>
+export type ManagedAccount = Account & { storageId?: number }
+export type Store = z.infer<typeof StoreSchema>
+export type ManagedStore = {
+  version: 1
+  activeIndex: number
+  accounts: ManagedAccount[]
+}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
-function sameValue(left: unknown, right: unknown) {
-  return JSON.stringify(left) === JSON.stringify(right)
+function clampActiveIndex(index: number, count: number) {
+  if (count === 0) return 0
+  return Math.max(0, Math.min(index, count - 1))
 }
 
-function matchAccountIndex(accounts: Account[], current: Account, fallback: number, used = new Set<number>()) {
-  const byIdentity = current.userId && current.accountId
-    ? accounts.findIndex((acc, index) => !used.has(index) && acc.userId === current.userId && acc.accountId === current.accountId)
-    : -1
-  if (byIdentity >= 0) return byIdentity
-  if (current.userId && current.accountId) return -1
-  const byRefreshToken = !current.userId && !current.accountId && current.refreshToken
-    ? accounts.findIndex((acc, index) => !used.has(index) && acc.refreshToken === current.refreshToken)
-    : -1
-  if (byRefreshToken >= 0) return byRefreshToken
-  return fallback >= 0 && fallback < accounts.length && !used.has(fallback) ? fallback : -1
+function normalizeAccount(account: ManagedAccount) {
+  const storageId = typeof account.storageId === "number" && Number.isInteger(account.storageId) && account.storageId > 0
+    ? account.storageId
+    : undefined
+  const parsed = AccountSchema.parse(account)
+  return storageId ? { ...parsed, storageId } : parsed
 }
 
-function updateAccount(target: Account, previous: Account, next: Account) {
-  const keys = new Set<keyof Account>([
-    ...Object.keys(previous),
-    ...Object.keys(next),
-  ] as Array<keyof Account>)
-  // Conflicts are resolved per field: the write that persists later wins only for
-  // the fields it changed, while unrelated fields from earlier writes stay intact.
-  for (const key of keys) {
-    if (sameValue(previous[key], next[key])) continue
-    const value = next[key]
-    if (value === undefined) delete (target as Record<string, unknown>)[key]
-    else (target as Record<string, unknown>)[key] = clone(value)
-  }
-}
-
-function insertAccountIndex(merged: Store, next: Store, usedNext: Set<number>, nextIndex: number) {
-  for (let index = nextIndex + 1; index < next.accounts.length; index++) {
-    if (!usedNext.has(index)) continue
-    const anchor = next.accounts[index]
-    if (!anchor) continue
-    const hit = matchAccountIndex(merged.accounts, anchor, -1)
-    if (hit >= 0) return hit
-  }
-  for (let index = nextIndex - 1; index >= 0; index--) {
-    if (!usedNext.has(index)) continue
-    const anchor = next.accounts[index]
-    if (!anchor) continue
-    const hit = matchAccountIndex(merged.accounts, anchor, -1)
-    if (hit >= 0) return hit + 1
-  }
-  return merged.accounts.length
-}
-
-function mergeStore(latest: Store, previous: Store, next: Store) {
-  const merged = clone(latest)
-  const nextByPrevious = new Map<number, number>()
-  const usedNext = new Set<number>()
-
-  for (const [index, account] of previous.accounts.entries()) {
-    const hit = matchAccountIndex(next.accounts, account, index, usedNext)
-    if (hit < 0) continue
-    nextByPrevious.set(index, hit)
-    usedNext.add(hit)
-  }
-
-  for (const [previousIndex, nextIndex] of nextByPrevious.entries()) {
-    const previousAccount = previous.accounts[previousIndex]
-    const nextAccount = next.accounts[nextIndex]
-    if (!previousAccount || !nextAccount) continue
-    const targetIndex = matchAccountIndex(merged.accounts, previousAccount, previousIndex)
-    if (targetIndex < 0) continue
-    updateAccount(merged.accounts[targetIndex]!, previousAccount, nextAccount)
-  }
-
-  for (const [previousIndex, previousAccount] of previous.accounts.entries()) {
-    if (nextByPrevious.has(previousIndex)) continue
-    const targetIndex = matchAccountIndex(merged.accounts, previousAccount, previousIndex)
-    if (targetIndex >= 0) merged.accounts.splice(targetIndex, 1)
-  }
-
-  for (const [nextIndex, nextAccount] of next.accounts.entries()) {
-    if (usedNext.has(nextIndex)) continue
-    const targetIndex = matchAccountIndex(merged.accounts, nextAccount, -1)
-    if (targetIndex >= 0) merged.accounts[targetIndex] = { ...merged.accounts[targetIndex]!, ...clone(nextAccount) }
-    else merged.accounts.splice(insertAccountIndex(merged, next, usedNext, nextIndex), 0, clone(nextAccount))
-  }
-
-  if (previous.activeIndex !== next.activeIndex) {
-    const active = next.accounts[next.activeIndex]
-    if (!active) merged.activeIndex = 0
-    else {
-      const hit = matchAccountIndex(merged.accounts, active, next.activeIndex)
-      if (hit >= 0) merged.activeIndex = hit
-    }
-  }
-
-  if (merged.accounts.length === 0) merged.activeIndex = 0
-  else merged.activeIndex = Math.max(0, Math.min(merged.activeIndex, merged.accounts.length - 1))
-
-  return merged
-}
-
-function emptyStore(): Store {
+function normalizeStore(store: Store | ManagedStore): ManagedStore {
+  const accounts = store.accounts.map((account) => normalizeAccount(account as ManagedAccount))
   return {
     version: 1,
-    activeIndex: 0,
-    accounts: [],
+    activeIndex: clampActiveIndex(store.activeIndex, accounts.length),
+    accounts,
   }
 }
 
-async function readStore(file: string): Promise<Store> {
-  try {
-    await access(file)
-    const text = await readFile(file, "utf8")
-    return Store.parse(JSON.parse(text))
-  } catch {
-    return emptyStore()
+function stripStore(store: ManagedStore): Store {
+  return {
+    version: 1,
+    activeIndex: clampActiveIndex(store.activeIndex, store.accounts.length),
+    accounts: store.accounts.map((account) => AccountSchema.parse(account)),
   }
 }
 
-async function writeStore(file: string, store: Store) {
-  const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`
-  await writeFile(tmp, JSON.stringify(store, null, 2) + "\n", "utf8")
-  await chmod(tmp, 0o600)
-  await rename(tmp, file)
+function rowToAccount(row: AccountRow): ManagedAccount {
+  return {
+    ...AccountSchema.parse({
+      label: row.label,
+      email: row.email ?? undefined,
+      planType: row.plan_type ?? undefined,
+      userId: row.user_id ?? undefined,
+      refreshToken: row.refresh_token,
+      accessToken: row.access_token,
+      tokenExpires: row.token_expires,
+      accountId: row.account_id ?? undefined,
+      addedAt: row.added_at,
+      lastUsed: row.last_used,
+      enabled: Boolean(row.enabled),
+      activeLimitId: row.active_limit_id,
+      limits: JSON.parse(row.limits_json) as unknown,
+      rateLimitResetTime: row.rate_limit_reset_time ?? undefined,
+    }),
+    storageId: row.id,
+  }
+}
+
+function openDatabase() {
+  const db = new Database(getAccountsDbPath(), { create: true })
+  db.run("PRAGMA journal_mode = WAL")
+  db.run("PRAGMA busy_timeout = 5000")
+  db.run(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      id INTEGER PRIMARY KEY,
+      label TEXT NOT NULL,
+      email TEXT,
+      plan_type TEXT,
+      user_id TEXT,
+      refresh_token TEXT NOT NULL,
+      access_token TEXT NOT NULL,
+      token_expires INTEGER NOT NULL,
+      account_id TEXT,
+      added_at INTEGER NOT NULL,
+      last_used INTEGER NOT NULL,
+      enabled INTEGER NOT NULL,
+      active_limit_id TEXT NOT NULL,
+      limits_json TEXT NOT NULL,
+      rate_limit_reset_time INTEGER,
+      position INTEGER NOT NULL UNIQUE
+    )
+  `)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS store_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `)
+  return db
+}
+
+function readManagedStore(db: Database): ManagedStore {
+  const rows = db.query(`
+    SELECT
+      id,
+      label,
+      email,
+      plan_type,
+      user_id,
+      refresh_token,
+      access_token,
+      token_expires,
+      account_id,
+      added_at,
+      last_used,
+      enabled,
+      active_limit_id,
+      limits_json,
+      rate_limit_reset_time,
+      position
+    FROM accounts
+    ORDER BY position ASC, id ASC
+  `).all() as AccountRow[]
+  const accounts = rows.map((row) => rowToAccount(row))
+  const active = db.query("SELECT value FROM store_meta WHERE key = ?").get("active_account_id") as { value: string } | null
+  const activeId = active ? Number.parseInt(active.value, 10) : NaN
+  const activeIndex = Number.isInteger(activeId) ? accounts.findIndex((account) => account.storageId === activeId) : -1
+  return {
+    version: 1,
+    activeIndex: clampActiveIndex(activeIndex, accounts.length),
+    accounts,
+  }
+}
+
+function writeManagedStore(db: Database, store: ManagedStore) {
+  const next = normalizeStore(store)
+  const insert = db.query(`
+    INSERT INTO accounts (
+      id,
+      label,
+      email,
+      plan_type,
+      user_id,
+      refresh_token,
+      access_token,
+      token_expires,
+      account_id,
+      added_at,
+      last_used,
+      enabled,
+      active_limit_id,
+      limits_json,
+      rate_limit_reset_time,
+      position
+    ) VALUES (
+      $id,
+      $label,
+      $email,
+      $planType,
+      $userId,
+      $refreshToken,
+      $accessToken,
+      $tokenExpires,
+      $accountId,
+      $addedAt,
+      $lastUsed,
+      $enabled,
+      $activeLimitId,
+      $limitsJson,
+      $rateLimitResetTime,
+      $position
+    )
+  `)
+
+  db.run("DELETE FROM accounts")
+
+  for (const [position, account] of next.accounts.entries()) {
+    const result = insert.run({
+      $id: account.storageId ?? null,
+      $label: account.label,
+      $email: account.email ?? null,
+      $planType: account.planType ?? null,
+      $userId: account.userId ?? null,
+      $refreshToken: account.refreshToken,
+      $accessToken: account.accessToken,
+      $tokenExpires: account.tokenExpires,
+      $accountId: account.accountId ?? null,
+      $addedAt: account.addedAt,
+      $lastUsed: account.lastUsed,
+      $enabled: account.enabled ? 1 : 0,
+      $activeLimitId: account.activeLimitId,
+      $limitsJson: JSON.stringify(account.limits),
+      $rateLimitResetTime: account.rateLimitResetTime ?? null,
+      $position: position,
+    })
+    account.storageId = account.storageId ?? Number(result.lastInsertRowid)
+  }
+
+  db.run("DELETE FROM store_meta WHERE key = ?", ["active_account_id"])
+  const active = next.accounts[next.activeIndex]
+  if (active?.storageId) {
+    db.run("INSERT INTO store_meta (key, value) VALUES (?, ?)", ["active_account_id", String(active.storageId)])
+  }
+
+  return next
 }
 
 export function getConfigDir() {
@@ -204,52 +269,49 @@ export function getConfigDir() {
   return join(xdg, "opencode")
 }
 
-export function getAccountsPath() {
-  return join(getConfigDir(), "codex-accounts.json")
+export function getAccountsDbPath() {
+  return join(getConfigDir(), "codex-accounts.sqlite")
+}
+
+export async function loadManagedStore(): Promise<ManagedStore> {
+  await mkdir(getConfigDir(), { recursive: true })
+  const db = openDatabase()
+  try {
+    return readManagedStore(db)
+  } finally {
+    db.close()
+  }
 }
 
 export async function loadStore(): Promise<Store> {
-  return readStore(getAccountsPath())
+  return stripStore(await loadManagedStore())
 }
 
-export async function saveStore(store: Store) {
-  const file = getAccountsPath()
-  const dir = dirname(file)
-  await mkdir(dir, { recursive: true })
-  const release = await lock(dir)
+export async function saveStore(store: Store | ManagedStore): Promise<Store> {
+  await mkdir(getConfigDir(), { recursive: true })
+  const db = openDatabase()
   try {
-    await writeStore(file, store)
+    const replace = db.transaction((input: Store | ManagedStore) => {
+      const next = writeManagedStore(db, normalizeStore(input))
+      return stripStore(next)
+    })
+    return replace.immediate(clone(store))
   } finally {
-    await release()
+    db.close()
   }
 }
 
-export async function saveStoreReconciled(previous: Store, next: Store) {
-  const file = getAccountsPath()
-  const dir = dirname(file)
-  await mkdir(dir, { recursive: true })
-  const release = await lock(dir)
+export async function updateStore(mutator: (store: ManagedStore) => void): Promise<ManagedStore> {
+  await mkdir(getConfigDir(), { recursive: true })
+  const db = openDatabase()
   try {
-    const latest = await readStore(file)
-    const merged = mergeStore(latest, previous, next)
-    await writeStore(file, merged)
-    return merged
+    const apply = db.transaction((change: (store: ManagedStore) => void) => {
+      const store = readManagedStore(db)
+      change(store)
+      return writeManagedStore(db, store)
+    })
+    return apply.immediate(mutator)
   } finally {
-    await release()
-  }
-}
-
-export async function updateStore(mutator: (store: Store) => void | Promise<void>) {
-  const file = getAccountsPath()
-  const dir = dirname(file)
-  await mkdir(dir, { recursive: true })
-  const release = await lock(dir)
-  try {
-    const store = await readStore(file)
-    await mutator(store)
-    await writeStore(file, store)
-    return store
-  } finally {
-    await release()
+    db.close()
   }
 }
