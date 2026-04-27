@@ -4,7 +4,6 @@ import { promptAccountLabel, promptLoginMenu } from "./cli.js";
 import { loadConfig } from "./config.js";
 import { OAUTH_DUMMY_KEY } from "./constants.js";
 import { createCodexFetch } from "./fetch.js";
-import { buildCodexModels } from "./models.js";
 import {
   buildAuthorizeUrl,
   generatePKCE,
@@ -19,60 +18,6 @@ import {
 } from "./server.js";
 
 const ID = "openai";
-
-function catalog() {
-  return Object.fromEntries(
-    Object.entries(buildCodexModels()).map(([id, model]) => [
-      id,
-      {
-        id,
-        providerID: ID,
-        api: {
-          id,
-          url: model.provider.api,
-          npm: model.provider.npm,
-        },
-        name: model.name,
-        family: model.family,
-        capabilities: {
-          temperature: model.temperature,
-          reasoning: model.reasoning,
-          attachment: model.attachment,
-          toolcall: model.tool_call,
-          input: {
-            text: model.modalities.input.includes("text"),
-            audio: model.modalities.input.includes("audio"),
-            image: model.modalities.input.includes("image"),
-            video: model.modalities.input.includes("video"),
-            pdf: model.modalities.input.includes("pdf"),
-          },
-          output: {
-            text: model.modalities.output.includes("text"),
-            audio: model.modalities.output.includes("audio"),
-            image: model.modalities.output.includes("image"),
-            video: model.modalities.output.includes("video"),
-            pdf: model.modalities.output.includes("pdf"),
-          },
-          interleaved: false,
-        },
-        cost: {
-          input: model.cost.input,
-          output: model.cost.output,
-          cache: {
-            read: model.cost.cache_read,
-            write: model.cost.cache_write,
-          },
-        },
-        limit: model.limit,
-        status: "active",
-        options: model.options,
-        headers: {},
-        release_date: model.release_date ?? "",
-        variants: model.variants,
-      },
-    ]),
-  );
-}
 
 async function sentinel(mgr: AccountManager) {
   const acc = mgr.list()[0];
@@ -178,13 +123,6 @@ export async function CodexMultiAuthPlugin(input: PluginInput): Promise<Hooks> {
   };
 
   return {
-    provider: {
-      id: ID,
-      async models(provider: { models: Record<string, unknown> }, ctx: { auth?: { type: string } }) {
-        if (ctx.auth?.type !== "oauth") return provider.models;
-        return catalog();
-      },
-    },
     auth: {
       provider: ID,
       async loader(getAuth) {
