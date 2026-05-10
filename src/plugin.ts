@@ -90,10 +90,15 @@ export async function CodexMultiAuthPlugin(input: PluginInput): Promise<Hooks> {
     const m = await getMgr();
     let message = "Account manager closed.";
     while (true) {
+      await m.reload();
       const act = await promptLoginMenu(m.list(), m.currentIndex());
       if (act.type === "done") break;
       if (act.type === "add-browser") return browser(await promptAccountLabel());
       if (act.type === "add-headless") return headless(await promptAccountLabel());
+      if (act.type === "set-current") {
+        message = (await m.setCurrent(act.index)) ? "Accounts updated." : "Current account unchanged.";
+        continue;
+      }
       if (act.type === "rename") {
         await m.rename(act.index, act.label);
         message = "Accounts updated.";

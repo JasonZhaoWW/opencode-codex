@@ -29,6 +29,7 @@ export type Action =
   | { type: "rename"; index: number; label: string }
   | { type: "toggle"; index: number }
   | { type: "quota"; index: number }
+  | { type: "set-current"; index: number }
   | { type: "remove"; index: number }
   | { type: "done" }
 
@@ -261,6 +262,10 @@ function itemBadges(item: Item) {
   return [statusBadge(item), current].filter((value) => value.length > 0).join(" ")
 }
 
+function canSetCurrent(item: Item) {
+  return !item.current && item.status === "active"
+}
+
 function summary(accounts: Account[], items: Item[], activeIndex: number) {
   const enabled = accounts.filter((account) => account.enabled !== false).length
   const rateLimited = items.filter((item) => item.status === "rate-limited").length
@@ -280,6 +285,7 @@ async function promptAccountDetailsTty(accounts: Account[], items: Item[], index
         { label: "Usage", value: { type: "back" }, kind: "heading", details: item.detailQuotaLines },
         { label: "", value: { type: "back" }, separator: true },
         { label: "Actions", value: { type: "back" }, kind: "heading" },
+        ...(canSetCurrent(item) ? [{ label: "Set as current account", value: { type: "set-current" as const, index }, color: "green" as const }] : []),
         { label: "Edit label", value: { type: "rename", index, label: account.label }, color: "cyan" },
         {
           label: account.enabled === false ? "Enable account" : "Disable account",
@@ -337,6 +343,7 @@ async function promptAccountDetailsFallback(accounts: Account[], items: Item[], 
   const item = items[index]
   if (!account || !item) return { type: "back" }
   const write = writer(io)
+  const setCurrent = canSetCurrent(item)
   while (true) {
     write(
       [
@@ -348,8 +355,9 @@ async function promptAccountDetailsFallback(accounts: Account[], items: Item[], 
         `  2. ${account.enabled === false ? "Enable" : "Disable"} account`,
         "  3. Refresh quota",
         "  4. Remove account",
+        setCurrent ? "  5. Set as current account" : undefined,
         "  0. Back",
-      ].join("\n") + "\n",
+      ].filter((value): value is string => Boolean(value)).join("\n") + "\n",
     )
     const value = await ask("Choice: ", io)
     if (value === "0" || value === "") return { type: "back" }
@@ -360,7 +368,8 @@ async function promptAccountDetailsFallback(accounts: Account[], items: Item[], 
       if (await confirmFallback(`Remove ${item.label}?`, io)) return { type: "remove", index }
       continue
     }
-    write("Invalid choice. Enter 0, 1, 2, 3, or 4.\n")
+    if (setCurrent && value === "5") return { type: "set-current", index }
+    write(`Invalid choice. Enter ${setCurrent ? "0, 1, 2, 3, 4, or 5" : "0, 1, 2, 3, or 4"}.\n`)
   }
 }
 

@@ -119,3 +119,55 @@ test("ensureFromAuth does not add a stale primary account over a newer store", a
     await done()
   }
 })
+
+test("stale request selection does not overwrite a newer manual current switch", async () => {
+  const done = await setupTestEnv()
+  let manual: AccountManager | undefined
+  const restore = installFetch((async () => {
+    if (!manual) throw new Error("missing manual manager")
+    await manual.setCurrent(1)
+    return new Response(
+      JSON.stringify({
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            limit_window_seconds: 18_000,
+            reset_at: 1_700_000_000,
+          },
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    )
+  }) as unknown as typeof fetch)
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [
+        account("blue", {}, DEFAULT_LIMIT_ID, { userId: "user-blue", accountId: "acct-blue" }),
+        account("red", {
+          codex: {
+            capturedAt: Date.now(),
+            primary: { usedPercent: 10, windowMinutes: 300, resetsAt: Math.trunc(Date.now() / 1000) + 600 },
+          },
+        }, DEFAULT_LIMIT_ID, { userId: "user-red", accountId: "acct-red" }),
+      ],
+    })
+
+    const stale = await AccountManager.load(client())
+    manual = await AccountManager.load(client())
+
+    const selected = await stale.select()
+    const saved = await loadStore()
+
+    expect(selected.account.label).toBe("red")
+    expect(saved.activeIndex).toBe(1)
+    expect(saved.accounts[1]?.lastUsed).toBeGreaterThan(0)
+  } finally {
+    restore()
+    await done()
+  }
+})

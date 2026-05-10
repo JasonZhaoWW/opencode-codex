@@ -133,6 +133,21 @@ test("promptLoginMenuFallback returns quota action", async () => {
   ).toEqual({ type: "quota", index: 0 })
 })
 
+test("promptLoginMenuFallback returns set-current action for eligible accounts", async () => {
+  const answers = ["4", "5"]
+  const writes: string[] = []
+
+  expect(
+    await promptLoginMenuFallback([account("current", {}), account("ready", {})], 0, {
+      ask: async () => answers.shift() || "0",
+      write: (text) => {
+        writes.push(text)
+      },
+    }),
+  ).toEqual({ type: "set-current", index: 1 })
+  expect(writes.join("\n")).toContain("5. Set as current account")
+})
+
 test("promptLoginMenuFallback shows structured quota lines", async () => {
   const writes: string[] = []
 

@@ -65,6 +65,10 @@ export class AccountManager {
     return this.store.activeIndex
   }
 
+  async reload() {
+    this.store = await loadManagedStore()
+  }
+
   async ensureFromAuth(auth: { type: string; refresh?: string; access?: string; expires?: number; accountId?: string }) {
     if (auth.type !== "oauth") return
     if (this.store.accounts.length > 0) return
@@ -120,6 +124,11 @@ export class AccountManager {
     return this.matchAccountIndex(this.store.accounts, current, fallback)
   }
 
+  private activeUnchanged(store: ManagedStore, active: ManagedAccount | undefined) {
+    if (!active) return store.accounts.length === 0
+    return this.matchAccountIndex(store.accounts, active, -1) === store.activeIndex
+  }
+
   private async mutateCurrent(
     current: ManagedAccount,
     fallback: number,
@@ -169,9 +178,10 @@ export class AccountManager {
     if (this.store.accounts.length === 0) {
       throw new Error("No ChatGPT accounts configured. Run opencode auth login --provider openai.")
     }
-    if ((await this.available(this.store.activeIndex)) && this.store.activeIndex !== skip) return this.store.activeIndex
+    const start = this.store.activeIndex
+    if (start !== skip && (await this.available(start))) return start
     for (let n = 0; n < this.store.accounts.length; n++) {
-      const i = (this.store.activeIndex + n + 1) % this.store.accounts.length
+      const i = (start + n + 1) % this.store.accounts.length
       if (i === skip) continue
       if (await this.available(i)) return i
     }
@@ -184,15 +194,47 @@ export class AccountManager {
   }
 
   async select(skip = -1) {
-    const i = await this.next(skip)
-    const acc = this.store.accounts[i]!
-    const lastUsed = now()
-    const hit = await this.mutateCurrent(acc, i, (current, store, index) => {
-      store.activeIndex = index
-      current.lastUsed = lastUsed
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.reload()
+      const active = this.store.accounts[this.store.activeIndex]
+      const i = await this.next(skip)
+      const acc = this.store.accounts[i]!
+      const lastUsed = now()
+      let changed = false
+      let selected: ManagedAccount | undefined
+      this.store = await updateStore((store) => {
+        if (!this.activeUnchanged(store, active)) {
+          changed = true
+          return
+        }
+        const hit = this.matchAccountIndex(store.accounts, acc, i)
+        if (hit < 0) return
+        store.activeIndex = hit
+        selected = store.accounts[hit]!
+        selected.lastUsed = lastUsed
+      })
+      if (changed) continue
+      if (selected) {
+        const index = this.findCurrentIndex(selected, this.store.activeIndex)
+        return { index, account: this.store.accounts[index]! }
+      }
+    }
+    throw new Error("Current account changed during selection. Try again.")
+  }
+
+  async setCurrent(index: number) {
+    const acc = this.store.accounts[index]
+    if (!acc) return false
+    let updated = false
+    this.store = await updateStore((store) => {
+      const hit = this.matchAccountIndex(store.accounts, acc, index)
+      if (hit < 0) return
+      const current = store.accounts[hit]!
+      if (!current.enabled || this.blocked(current)) return
+      store.activeIndex = hit
+      updated = true
     })
-    const index = hit >= 0 ? hit : this.store.activeIndex
-    return { index, account: this.store.accounts[index]! }
+    return updated
   }
 
   async markRateLimited(index: number, reset = now() + DEFAULT_LIMIT_MS, active = DEFAULT_LIMIT_ID) {
