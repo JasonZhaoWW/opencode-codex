@@ -20,6 +20,27 @@ export type TokenResponse = {
   expires_in?: number
 }
 
+export type RefreshTokenResponse = Omit<TokenResponse, "refresh_token"> & {
+  refresh_token?: string
+}
+
+export class TokenRefreshError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+    readonly permanent: boolean,
+  ) {
+    super(message)
+    this.name = "TokenRefreshError"
+  }
+}
+
+type RefreshFailure = {
+  code?: string
+  message?: string
+}
+
 export type Claims = {
   email?: string
   chatgpt_plan_type?: string
@@ -102,7 +123,55 @@ export async function exchangeCodeForTokens(code: string, uri: string, pkce: Pkc
   return (await res.json()) as TokenResponse
 }
 
-export async function refreshAccessToken(refresh: string): Promise<TokenResponse> {
+function object(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value))
+}
+
+function string(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+
+function parseRefreshFailure(body: string): RefreshFailure {
+  if (!body.trim()) return {}
+  try {
+    const parsed = JSON.parse(body) as unknown
+    if (!object(parsed)) return { message: body }
+    const error = parsed.error
+    const nested = object(error) ? error : undefined
+    return {
+      code: string(nested?.code) || string(nested?.type) || string(error) || string(parsed.code) || string(parsed.error_code),
+      message: string(nested?.message) || string(parsed.error_description) || string(parsed.message),
+    }
+  } catch {
+    return { message: body }
+  }
+}
+
+function permanentRefreshMessage(code: string | undefined) {
+  switch (code) {
+    case "refresh_token_expired":
+      return "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again."
+    case "refresh_token_reused":
+      return "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again."
+    case "refresh_token_invalidated":
+      return "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again."
+    case "invalid_grant":
+    case "invalid_refresh_token":
+      return "Your access token could not be refreshed because your refresh token is invalid. Please log out and sign in again."
+    default:
+      return "Your access token could not be refreshed. Please log out and sign in again."
+  }
+}
+
+function isPermanentRefreshFailure(status: number, code: string | undefined) {
+  return status === 401 || code === "refresh_token_expired" || code === "refresh_token_reused" || code === "refresh_token_invalidated" || code === "invalid_grant" || code === "invalid_refresh_token"
+}
+
+export function isPermanentTokenRefreshError(err: unknown) {
+  return err instanceof TokenRefreshError && err.permanent
+}
+
+export async function refreshAccessToken(refresh: string): Promise<RefreshTokenResponse> {
   const res = await fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -112,8 +181,17 @@ export async function refreshAccessToken(refresh: string): Promise<TokenResponse
       client_id: CLIENT_ID,
     }).toString(),
   })
-  if (!res.ok) throw new Error(`Token refresh failed: ${res.status}`)
-  return (await res.json()) as TokenResponse
+  const body = await res.text()
+  if (!res.ok) {
+    const failure = parseRefreshFailure(body)
+    const code = failure.code?.toLowerCase()
+    const permanent = isPermanentRefreshFailure(res.status, code)
+    const message = permanent
+      ? permanentRefreshMessage(code)
+      : `Token refresh failed: ${res.status}${failure.message ? `: ${failure.message}` : ""}`
+    throw new TokenRefreshError(message, res.status, code, permanent)
+  }
+  return JSON.parse(body) as RefreshTokenResponse
 }
 
 export async function startDeviceFlow() {

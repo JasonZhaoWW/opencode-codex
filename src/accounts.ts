@@ -1,8 +1,10 @@
 import type { PluginInput } from "@opencode-ai/plugin"
+import { clearInterval, setInterval } from "node:timers"
+import { setTimeout as sleep } from "node:timers/promises"
 import { DEFAULT_LIMIT_ID, DEFAULT_LIMIT_MS, LIMIT_STALE_MS } from "./constants.js"
 import { fetchUsageLimits, limitBlocked, limitReset, normalizeLimitId, type LimitMap } from "./limits.js"
-import { accessExpired, extractAccountIdentity, extractEmail, refreshAccessToken, tokenExpires, type TokenIdentity, type TokenResponse } from "./oauth.js"
-import { loadManagedStore, updateStore, type Account, type ManagedAccount, type ManagedStore } from "./storage.js"
+import { accessExpired, extractAccountIdentity, extractEmail, isPermanentTokenRefreshError, refreshAccessToken, tokenExpires, type TokenIdentity, type TokenResponse } from "./oauth.js"
+import { extendRefreshLock, loadManagedStore, releaseRefreshLock, tryAcquireRefreshLock, updateStore, type Account, type ManagedAccount, type ManagedStore } from "./storage.js"
 
 type Client = PluginInput["client"]
 
@@ -14,6 +16,38 @@ type RawClient = {
 
 function now() {
   return Date.now()
+}
+
+const REFRESH_LOCK_LEASE_MS = 2 * 60 * 1000
+const REFRESH_LOCK_POLL_MS = 50
+
+async function acquireRefreshLock() {
+  const owner = `${process.pid}-${now()}-${Math.random().toString(36).slice(2)}`
+  while (true) {
+    if (await tryAcquireRefreshLock(owner, now() + REFRESH_LOCK_LEASE_MS)) {
+      const heartbeat = setInterval(() => {
+        void extendRefreshLock(owner, now() + REFRESH_LOCK_LEASE_MS).catch(() => undefined)
+      }, Math.floor(REFRESH_LOCK_LEASE_MS / 2))
+      heartbeat.unref()
+      let released = false
+      return async () => {
+        if (released) return
+        released = true
+        clearInterval(heartbeat)
+        await releaseRefreshLock(owner)
+      }
+    }
+    await sleep(REFRESH_LOCK_POLL_MS)
+  }
+}
+
+async function withRefreshLock<T>(fn: () => Promise<T>) {
+  const release = await acquireRefreshLock()
+  try {
+    return await fn()
+  } finally {
+    await release()
+  }
 }
 
 function applyIdentity(acc: Account, identity: TokenIdentity) {
@@ -262,29 +296,44 @@ export class AccountManager {
     })
   }
 
-  async refresh(index: number, sync = true) {
+  async refresh(index: number, sync = true, force = false) {
     const acc = this.store.accounts[index]
     if (!acc) throw new Error("Missing account")
     try {
-      const token = await refreshAccessToken(acc.refreshToken)
-      this.store = await updateStore((store) => {
-        const hit = this.matchAccountIndex(store.accounts, acc, index)
+      const refreshed = await withRefreshLock(async () => {
+        this.store = await loadManagedStore()
+        const hit = this.findCurrentIndex(acc, index)
         if (hit < 0) throw new Error("Missing account")
-        const current = store.accounts[hit]!
-        current.accessToken = token.access_token
-        current.refreshToken = token.refresh_token || current.refreshToken
-        current.tokenExpires = tokenExpires(token.expires_in)
-        applyIdentity(current, extractAccountIdentity(token))
-        current.email = extractEmail(token) || current.email
+        const current = this.store.accounts[hit]!
+        const changed = current.accessToken !== acc.accessToken || current.refreshToken !== acc.refreshToken || current.tokenExpires !== acc.tokenExpires
+        if (current.refreshToken !== acc.refreshToken || (!force && !accessExpired(current.tokenExpires)) || (force && changed && !accessExpired(current.tokenExpires))) {
+          return { account: current, index: hit, remote: false }
+        }
+
+        const token = await refreshAccessToken(current.refreshToken)
+        this.store = await updateStore((store) => {
+          const latest = this.matchAccountIndex(store.accounts, current, hit)
+          if (latest < 0) throw new Error("Missing account")
+          const target = store.accounts[latest]!
+          target.accessToken = token.access_token
+          target.refreshToken = token.refresh_token || target.refreshToken
+          target.tokenExpires = tokenExpires(token.expires_in)
+          applyIdentity(target, extractAccountIdentity(token))
+          target.email = extractEmail(token) || target.email
+        })
+        const saved = this.findCurrentIndex(current, hit)
+        if (saved < 0) throw new Error("Missing account")
+        return { account: this.store.accounts[saved]!, index: saved, remote: true }
       })
-      const hit = this.findCurrentIndex(acc, index)
-      if (sync && hit >= 0) await this.hydrate(hit, false).catch(() => undefined)
-      return hit >= 0 ? this.store.accounts[hit]! : acc
+      if (sync && refreshed.remote) await this.hydrate(refreshed.index, false).catch(() => undefined)
+      return refreshed.account
     } catch (err) {
-      await this.mutateCurrent(acc, index, (current) => {
-        current.enabled = false
-      })
-      await this.sync()
+      if (isPermanentTokenRefreshError(err)) {
+        await this.mutateCurrent(acc, index, (current) => {
+          current.enabled = false
+        })
+        await this.sync()
+      }
       throw err
     }
   }

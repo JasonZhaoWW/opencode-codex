@@ -117,6 +117,50 @@ test("account manager quota refreshes expired access tokens first", async () => 
   }
 })
 
+test("account manager persists rotated refresh token for later refreshes", async () => {
+  const done = await setupTestEnv()
+  const bodies: string[] = []
+  const restore = installFetch((async (input, init) => {
+    expect(String(input)).toBe("https://auth.openai.com/oauth/token")
+    bodies.push(String(init?.body))
+    const call = bodies.length
+    return new Response(
+      JSON.stringify({
+        access_token: call === 1 ? "first-access" : "second-access",
+        refresh_token: call === 1 ? "rotated-refresh" : "final-refresh",
+        expires_in: 3600,
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    )
+  }) as typeof fetch)
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("expired", {}, DEFAULT_LIMIT_ID, { accessToken: "expired-access", refreshToken: "old-refresh", tokenExpires: Date.now() - 60_000 })],
+    })
+
+    const mgr = await AccountManager.load(client())
+    await mgr.refresh(0, false)
+
+    const saved = await loadStore()
+    saved.accounts[0]!.tokenExpires = Date.now() - 60_000
+    await saveStore(saved)
+    await mgr.reload()
+    await mgr.refresh(0, false)
+
+    expect(bodies[0]).toContain("refresh_token=old-refresh")
+    expect(bodies[1]).toContain("refresh_token=rotated-refresh")
+    expect((await loadStore()).accounts[0]).toMatchObject({ accessToken: "second-access", refreshToken: "final-refresh" })
+  } finally {
+    restore()
+    await done()
+  }
+})
+
 test("account manager quota disables expired accounts when refresh fails", async () => {
   const done = await setupTestEnv()
   const calls: string[] = []
@@ -144,7 +188,7 @@ test("account manager quota disables expired accounts when refresh fails", async
 
     const hit = (await loadStore()).accounts[0]
     expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toBe("Token refresh failed: 401")
+    expect((error as Error).message).toBe("Your access token could not be refreshed. Please log out and sign in again.")
     expect(calls).toEqual(["https://auth.openai.com/oauth/token"])
     expect(hit?.enabled).toBe(false)
   } finally {

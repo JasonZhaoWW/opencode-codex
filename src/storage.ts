@@ -40,6 +40,13 @@ const StoreSchema = z.object({
   accounts: z.array(AccountSchema),
 })
 
+const RefreshLockSchema = z.object({
+  owner: z.string(),
+  expiresAt: z.number().int().nonnegative(),
+})
+
+const REFRESH_LOCK_KEY = "refresh_lock"
+
 type AccountRow = {
   id: number
   label: string
@@ -59,6 +66,10 @@ type AccountRow = {
   position: number
 }
 
+type MetaRow = {
+  value: string
+}
+
 export type Account = z.infer<typeof AccountSchema>
 export type ManagedAccount = Account & { storageId?: number }
 export type Store = z.infer<typeof StoreSchema>
@@ -67,6 +78,8 @@ export type ManagedStore = {
   activeIndex: number
   accounts: ManagedAccount[]
 }
+
+export type RefreshLock = z.infer<typeof RefreshLockSchema>
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
@@ -190,6 +203,23 @@ function readManagedStore(db: Database): ManagedStore {
   }
 }
 
+function readRefreshLock(db: Database) {
+  const row = db.query("SELECT value FROM store_meta WHERE key = ?").get(REFRESH_LOCK_KEY) as MetaRow | null
+  if (!row) return
+  try {
+    return RefreshLockSchema.parse(JSON.parse(row.value))
+  } catch {
+    return
+  }
+}
+
+function writeRefreshLock(db: Database, lock: RefreshLock) {
+  db.run(
+    "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    [REFRESH_LOCK_KEY, JSON.stringify(lock)],
+  )
+}
+
 function writeManagedStore(db: Database, store: ManagedStore) {
   const next = normalizeStore(store)
   const insert = db.query(`
@@ -311,6 +341,52 @@ export async function updateStore(mutator: (store: ManagedStore) => void): Promi
       return writeManagedStore(db, store)
     })
     return apply.immediate(mutator)
+  } finally {
+    db.close()
+  }
+}
+
+export async function tryAcquireRefreshLock(owner: string, expiresAt: number, at = Date.now()) {
+  await mkdir(getConfigDir(), { recursive: true })
+  const db = openDatabase()
+  try {
+    const acquire = db.transaction((lockOwner: string, lockExpiresAt: number, now: number) => {
+      const current = readRefreshLock(db)
+      if (current && current.expiresAt > now) return false
+      writeRefreshLock(db, { owner: lockOwner, expiresAt: lockExpiresAt })
+      return true
+    })
+    return acquire.immediate(owner, expiresAt, at)
+  } finally {
+    db.close()
+  }
+}
+
+export async function extendRefreshLock(owner: string, expiresAt: number) {
+  await mkdir(getConfigDir(), { recursive: true })
+  const db = openDatabase()
+  try {
+    const extend = db.transaction((lockOwner: string, lockExpiresAt: number) => {
+      const current = readRefreshLock(db)
+      if (current?.owner !== lockOwner) return false
+      writeRefreshLock(db, { owner: lockOwner, expiresAt: lockExpiresAt })
+      return true
+    })
+    return extend.immediate(owner, expiresAt)
+  } finally {
+    db.close()
+  }
+}
+
+export async function releaseRefreshLock(owner: string) {
+  await mkdir(getConfigDir(), { recursive: true })
+  const db = openDatabase()
+  try {
+    const release = db.transaction((lockOwner: string) => {
+      const current = readRefreshLock(db)
+      if (current?.owner === lockOwner) db.run("DELETE FROM store_meta WHERE key = ?", [REFRESH_LOCK_KEY])
+    })
+    release.immediate(owner)
   } finally {
     db.close()
   }

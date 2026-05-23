@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { setTimeout as sleep } from "node:timers/promises"
 
 import { AccountManager } from "../../src/accounts.js"
 import { DEFAULT_LIMIT_ID } from "../../src/constants.js"
@@ -166,6 +167,49 @@ test("stale request selection does not overwrite a newer manual current switch",
     expect(selected.account.label).toBe("red")
     expect(saved.activeIndex).toBe(1)
     expect(saved.accounts[1]?.lastUsed).toBeGreaterThan(0)
+  } finally {
+    restore()
+    await done()
+  }
+})
+
+test("concurrent expired account refreshes reuse the stored fresh credentials", async () => {
+  const done = await setupTestEnv()
+  let refreshCalls = 0
+  const restore = installFetch((async (input, init) => {
+    expect(String(input)).toBe("https://auth.openai.com/oauth/token")
+    expect(String(init?.body)).toContain("refresh_token=expired-refresh")
+    const call = ++refreshCalls
+    await sleep(20)
+    return new Response(
+      JSON.stringify({
+        access_token: `fresh-access-${call}`,
+        refresh_token: `fresh-refresh-${call}`,
+        expires_in: 3600,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+  }) as typeof fetch)
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("expired", {}, DEFAULT_LIMIT_ID, { accessToken: "expired-access", refreshToken: "expired-refresh", tokenExpires: Date.now() - 60_000 })],
+    })
+
+    const first = await AccountManager.load(client())
+    const second = await AccountManager.load(client())
+    const third = await AccountManager.load(client())
+
+    const refreshed = await Promise.all([
+      first.refresh(0, false),
+      second.refresh(0, false),
+      third.refresh(0, false),
+    ])
+
+    expect(refreshCalls).toBe(1)
+    expect(refreshed.map((item) => item.accessToken)).toEqual(["fresh-access-1", "fresh-access-1", "fresh-access-1"])
+    expect((await loadStore()).accounts[0]).toMatchObject({ accessToken: "fresh-access-1", refreshToken: "fresh-refresh-1" })
   } finally {
     restore()
     await done()
