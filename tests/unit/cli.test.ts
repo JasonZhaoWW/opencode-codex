@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 
-import { buildAccountMenuItems, promptAccountLabel, promptLoginMenuFallback } from "../../src/cli.js"
+import { buildAccountMenuItems, promptAccessToken, promptAccountLabel, promptLoginMenuFallback } from "../../src/cli.js"
 import { DEFAULT_LIMIT_ID } from "../../src/constants.js"
 import { ANSI } from "../../src/ui/ansi.js"
 import { account } from "../support/fixtures.js"
@@ -70,7 +70,25 @@ test("promptLoginMenuFallback retries invalid top-level input", async () => {
   })
 
   expect(action).toEqual({ type: "add-browser" })
-  expect(writes.join("\n")).toContain("Invalid choice. Enter 0, 1, 2, or an account number.")
+  expect(writes.join("\n")).toContain("Invalid choice. Enter 0, 1, 2, i, or an account number.")
+})
+
+test("promptLoginMenuFallback returns access-token import action", async () => {
+  expect(
+    await promptLoginMenuFallback([], 0, {
+      ask: async () => "i",
+      write: () => undefined,
+    }),
+  ).toEqual({ type: "add-access-token" })
+})
+
+test("promptAccessToken trims prompted access token input", async () => {
+  expect(
+    await promptAccessToken({
+      ask: async () => "  token-value  ",
+      write: () => undefined,
+    }),
+  ).toBe("token-value")
 })
 
 test("promptLoginMenuFallback requires confirmation before removal", async () => {

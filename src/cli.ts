@@ -26,6 +26,7 @@ function isCurrentAccount(index: number, activeIndex: number) {
 export type Action =
   | { type: "add-browser" }
   | { type: "add-headless" }
+  | { type: "add-access-token" }
   | { type: "rename"; index: number; label: string }
   | { type: "toggle"; index: number }
   | { type: "quota"; index: number }
@@ -41,6 +42,7 @@ export type PromptIO = {
 type TopLevelChoice =
   | { type: "add-browser" }
   | { type: "add-headless" }
+  | { type: "add-access-token" }
   | { type: "account"; index: number }
   | { type: "done" }
 
@@ -246,6 +248,49 @@ async function ask(msg: string, io?: PromptIO) {
   }
 }
 
+async function askHidden(msg: string, io?: PromptIO) {
+  if (io?.ask) return io.ask(msg)
+  if (!isTTY()) return ask(msg)
+  return new Promise<string>((resolve) => {
+    let value = ""
+    const wasRaw = input.isRaw ?? false
+    let cleaned = false
+
+    const cleanup = () => {
+      if (cleaned) return
+      cleaned = true
+      try {
+        input.removeListener("data", onData)
+        input.setRawMode(wasRaw)
+        input.pause()
+      } catch {}
+      output.write("\n")
+    }
+
+    const finish = () => {
+      cleanup()
+      resolve(value.trim())
+    }
+
+    const onData = (data: Buffer) => {
+      for (const char of data.toString("utf8")) {
+        if (char === "\r" || char === "\n") return finish()
+        if (char === "\u0003") return finish()
+        if (char === "\u007f" || char === "\b") {
+          value = value.slice(0, -1)
+          continue
+        }
+        if (char >= " ") value += char
+      }
+    }
+
+    output.write(msg)
+    input.setRawMode(true)
+    input.resume()
+    input.on("data", onData)
+  })
+}
+
 async function confirmFallback(message: string, io?: PromptIO) {
   const value = (await ask(`${message} [y/N]: `, io)).toLowerCase()
   return value === "y" || value === "yes"
@@ -315,6 +360,7 @@ async function promptLoginMenuTty(accounts: Account[], activeIndex: number): Pro
       { label: "Actions", value: { type: "done" }, kind: "heading" },
       { label: "Add account (browser)", value: { type: "add-browser" }, color: "cyan" },
       { label: "Add account (headless)", value: { type: "add-headless" }, color: "cyan" },
+      { label: "Import ChatGPT access token", value: { type: "add-access-token" }, color: "cyan" },
       { label: "", value: { type: "done" }, separator: true },
       { label: "Accounts", value: { type: "done" }, kind: "heading" },
       ...items.map((item, index) => ({
@@ -331,7 +377,7 @@ async function promptLoginMenuTty(accounts: Account[], activeIndex: number): Pro
       clearScreen: true,
     })
     if (!choice || choice.type === "done") return { type: "done" }
-    if (choice.type === "add-browser" || choice.type === "add-headless") return choice
+    if (choice.type === "add-browser" || choice.type === "add-headless" || choice.type === "add-access-token") return choice
     const next = await promptAccountDetailsTty(accounts, items, choice.index)
     if (next.type === "back") continue
     return next
@@ -380,6 +426,10 @@ export async function promptAccountLabel(io?: PromptIO, current?: string) {
   return `account-${Date.now()}`
 }
 
+export async function promptAccessToken(io?: PromptIO) {
+  return (await askHidden("ChatGPT OAuth access token: ", io)).trim()
+}
+
 export async function promptLoginMenuFallback(accounts: Account[], activeIndex = -1, io?: PromptIO): Promise<Action> {
   const write = writer(io)
   while (true) {
@@ -388,6 +438,7 @@ export async function promptLoginMenuFallback(accounts: Account[], activeIndex =
       "Manage ChatGPT accounts:",
       "  1. Add account (browser)",
       "  2. Add account (headless)",
+      "  i. Import ChatGPT access token",
     ]
     for (const [index, item] of items.entries()) {
       lines.push(`  ${index + 3}. ${item.label} [${item.status}]${item.current ? " [current]" : ""}`)
@@ -400,6 +451,7 @@ export async function promptLoginMenuFallback(accounts: Account[], activeIndex =
     const value = await ask("Choice: ", io)
     if (value === "1") return { type: "add-browser" }
     if (value === "2") return { type: "add-headless" }
+    if (value.toLowerCase() === "i") return { type: "add-access-token" }
     if (value === "0" || value === "") return { type: "done" }
     const index = Number.parseInt(value, 10) - 3
     if (Number.isInteger(index) && index >= 0 && index < accounts.length) {
@@ -407,7 +459,7 @@ export async function promptLoginMenuFallback(accounts: Account[], activeIndex =
       if (action.type === "back") continue
       return action
     }
-    write("Invalid choice. Enter 0, 1, 2, or an account number.\n")
+    write("Invalid choice. Enter 0, 1, 2, i, or an account number.\n")
   }
 }
 

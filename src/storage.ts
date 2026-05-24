@@ -22,7 +22,7 @@ const AccountSchema = z.object({
   email: z.string().optional(),
   planType: z.string().optional(),
   userId: z.string().optional(),
-  refreshToken: z.string(),
+  refreshToken: z.string().optional(),
   accessToken: z.string(),
   tokenExpires: z.number().int().nonnegative(),
   accountId: z.string().optional(),
@@ -53,7 +53,7 @@ type AccountRow = {
   email: string | null
   plan_type: string | null
   user_id: string | null
-  refresh_token: string
+  refresh_token: string | null
   access_token: string
   token_expires: number
   account_id: string | null
@@ -122,7 +122,7 @@ function rowToAccount(row: AccountRow): ManagedAccount {
       email: row.email ?? undefined,
       planType: row.plan_type ?? undefined,
       userId: row.user_id ?? undefined,
-      refreshToken: row.refresh_token,
+      refreshToken: row.refresh_token ?? undefined,
       accessToken: row.access_token,
       tokenExpires: row.token_expires,
       accountId: row.account_id ?? undefined,
@@ -148,7 +148,7 @@ function openDatabase() {
       email TEXT,
       plan_type TEXT,
       user_id TEXT,
-      refresh_token TEXT NOT NULL,
+      refresh_token TEXT,
       access_token TEXT NOT NULL,
       token_expires INTEGER NOT NULL,
       account_id TEXT,
@@ -161,6 +161,7 @@ function openDatabase() {
       position INTEGER NOT NULL UNIQUE
     )
   `)
+  migrateNullableRefreshToken(db)
   db.run(`
     CREATE TABLE IF NOT EXISTS store_meta (
       key TEXT PRIMARY KEY,
@@ -168,6 +169,75 @@ function openDatabase() {
     )
   `)
   return db
+}
+
+function migrateNullableRefreshToken(db: Database) {
+  const info = db.query("PRAGMA table_info(accounts)").all() as Array<{ name: string; notnull: number }>
+  const refresh = info.find((column) => column.name === "refresh_token")
+  if (!refresh?.notnull) return
+  const migrate = db.transaction(() => {
+    db.run("ALTER TABLE accounts RENAME TO accounts_old")
+    db.run(`
+      CREATE TABLE accounts (
+        id INTEGER PRIMARY KEY,
+        label TEXT NOT NULL,
+        email TEXT,
+        plan_type TEXT,
+        user_id TEXT,
+        refresh_token TEXT,
+        access_token TEXT NOT NULL,
+        token_expires INTEGER NOT NULL,
+        account_id TEXT,
+        added_at INTEGER NOT NULL,
+        last_used INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        active_limit_id TEXT NOT NULL,
+        limits_json TEXT NOT NULL,
+        rate_limit_reset_time INTEGER,
+        position INTEGER NOT NULL UNIQUE
+      )
+    `)
+    db.run(`
+      INSERT INTO accounts (
+        id,
+        label,
+        email,
+        plan_type,
+        user_id,
+        refresh_token,
+        access_token,
+        token_expires,
+        account_id,
+        added_at,
+        last_used,
+        enabled,
+        active_limit_id,
+        limits_json,
+        rate_limit_reset_time,
+        position
+      )
+      SELECT
+        id,
+        label,
+        email,
+        plan_type,
+        user_id,
+        refresh_token,
+        access_token,
+        token_expires,
+        account_id,
+        added_at,
+        last_used,
+        enabled,
+        active_limit_id,
+        limits_json,
+        rate_limit_reset_time,
+        position
+      FROM accounts_old
+    `)
+    db.run("DROP TABLE accounts_old")
+  })
+  migrate()
 }
 
 function readManagedStore(db: Database): ManagedStore {
@@ -269,7 +339,7 @@ function writeManagedStore(db: Database, store: ManagedStore) {
       $email: account.email ?? null,
       $planType: account.planType ?? null,
       $userId: account.userId ?? null,
-      $refreshToken: account.refreshToken,
+      $refreshToken: account.refreshToken ?? null,
       $accessToken: account.accessToken,
       $tokenExpires: account.tokenExpires,
       $accountId: account.accountId ?? null,

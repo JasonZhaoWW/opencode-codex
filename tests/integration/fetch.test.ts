@@ -179,3 +179,60 @@ test("codex fetch still fails over to the next account after rate limit", async 
     await done()
   }
 })
+
+test("codex fetch uses imported access-token accounts for requests", async () => {
+  const done = await setupTestEnv()
+  const restore = installFetch((async (input, init) => {
+    expect(String(input)).toBe(CODEX_API_ENDPOINT)
+    const headers = new Headers(init?.headers)
+    expect(headers.get("authorization")).toBe("Bearer imported-access")
+    expect(headers.get("ChatGPT-Account-Id")).toBe("acct_imported")
+    return new Response("ok", { status: 200 })
+  }) as typeof fetch)
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("imported", freshLimits(), DEFAULT_LIMIT_ID, { refreshToken: undefined, accessToken: "imported-access", accountId: "acct_imported" })],
+    })
+
+    const mgr = await AccountManager.load(client())
+    const res = await createCodexFetch(mgr)("https://api.openai.com/v1/responses", { method: "POST", body: "{}" })
+
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe("ok")
+  } finally {
+    restore()
+    await done()
+  }
+})
+
+test("codex fetch can fail over from rate-limited imported accounts", async () => {
+  const done = await setupTestEnv()
+  const authorizations: Array<string | null> = []
+  const restore = installFetch((async (input, init) => {
+    expect(String(input)).toBe(CODEX_API_ENDPOINT)
+    authorizations.push(new Headers(init?.headers).get("authorization"))
+    if (authorizations.length === 1) return new Response("limited", { status: 429, headers: { "Retry-After": "60" } })
+    return new Response("ok", { status: 200 })
+  }) as typeof fetch)
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [
+        account("imported", freshLimits(), DEFAULT_LIMIT_ID, { refreshToken: undefined, accessToken: "imported-access", accountId: "acct_imported" }),
+        account("oauth", freshLimits(), DEFAULT_LIMIT_ID, { accessToken: "oauth-access", accountId: "acct_oauth" }),
+      ],
+    })
+
+    const mgr = await AccountManager.load(client())
+    const res = await createCodexFetch(mgr)("https://api.openai.com/v1/responses", { method: "POST", body: "{}" })
+
+    expect(res.status).toBe(200)
+    expect(authorizations).toEqual(["Bearer imported-access", "Bearer oauth-access"])
+  } finally {
+    restore()
+    await done()
+  }
+})

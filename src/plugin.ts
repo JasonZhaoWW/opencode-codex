@@ -1,8 +1,8 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
 import { AccountManager } from "./accounts.js";
-import { promptAccountLabel, promptLoginMenu } from "./cli.js";
+import { promptAccessToken, promptAccountLabel, promptLoginMenu } from "./cli.js";
 import { loadConfig } from "./config.js";
-import { OAUTH_DUMMY_KEY } from "./constants.js";
+import { OAUTH_DUMMY_KEY, OAUTH_SENTINEL_REFRESH } from "./constants.js";
 import { createCodexFetch } from "./fetch.js";
 import {
   buildAuthorizeUrl,
@@ -24,7 +24,7 @@ async function sentinel(mgr: AccountManager) {
   if (!acc) return { type: "failed" as const };
   return {
     type: "success" as const,
-    refresh: acc.refreshToken,
+    refresh: acc.refreshToken ?? OAUTH_SENTINEL_REFRESH,
     access: acc.accessToken,
     expires: acc.tokenExpires,
     ...(acc.accountId ? { accountId: acc.accountId } : {}),
@@ -56,7 +56,7 @@ export async function CodexMultiAuthPlugin(input: PluginInput): Promise<Hooks> {
         const acc = await m.add(tokens, tag || (await promptAccountLabel()));
         return {
           type: "success" as const,
-          refresh: acc.refreshToken,
+          refresh: acc.refreshToken ?? OAUTH_SENTINEL_REFRESH,
           access: acc.accessToken,
           expires: acc.tokenExpires,
           ...(acc.accountId ? { accountId: acc.accountId } : {}),
@@ -77,7 +77,7 @@ export async function CodexMultiAuthPlugin(input: PluginInput): Promise<Hooks> {
         const acc = await m.add(tokens, tag || (await promptAccountLabel()));
         return {
           type: "success" as const,
-          refresh: acc.refreshToken,
+          refresh: acc.refreshToken ?? OAUTH_SENTINEL_REFRESH,
           access: acc.accessToken,
           expires: acc.tokenExpires,
           ...(acc.accountId ? { accountId: acc.accountId } : {}),
@@ -95,6 +95,12 @@ export async function CodexMultiAuthPlugin(input: PluginInput): Promise<Hooks> {
       if (act.type === "done") break;
       if (act.type === "add-browser") return browser(await promptAccountLabel());
       if (act.type === "add-headless") return headless(await promptAccountLabel());
+      if (act.type === "add-access-token") {
+        const label = await promptAccountLabel();
+        await m.importAccessToken(await promptAccessToken(), label);
+        message = "Accounts updated.";
+        continue;
+      }
       if (act.type === "set-current") {
         message = (await m.setCurrent(act.index)) ? "Accounts updated." : "Current account unchanged.";
         continue;

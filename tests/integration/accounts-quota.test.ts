@@ -50,6 +50,48 @@ test("account manager quota refresh updates limits without rotating tokens", asy
   }
 })
 
+test("account manager quota uses imported non-refreshable account tokens", async () => {
+  const done = await setupTestEnv()
+  const restore = installFetch((async (input, init) => {
+    expect(input).toBe("https://chatgpt.com/backend-api/wham/usage")
+    const headers = new Headers(init?.headers)
+    expect(headers.get("authorization")).toBe("Bearer imported-access")
+    expect(headers.get("ChatGPT-Account-Id")).toBe("acct_123")
+    return new Response(
+      JSON.stringify({
+        rate_limit: {
+          primary_window: {
+            used_percent: 42,
+            limit_window_seconds: 18_000,
+            reset_at: 1_700_000_000,
+          },
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    )
+  }) as typeof fetch)
+  try {
+    await saveStore({
+      version: 1,
+      activeIndex: 0,
+      accounts: [account("imported", {}, DEFAULT_LIMIT_ID, { refreshToken: undefined, accessToken: "imported-access", accountId: "acct_123" })],
+    })
+
+    const mgr = await AccountManager.load(client())
+    await mgr.quota(0)
+
+    const hit = (await loadStore()).accounts[0]
+    expect(hit?.refreshToken).toBeUndefined()
+    expect(hit?.limits.codex?.primary?.usedPercent).toBe(42)
+  } finally {
+    restore()
+    await done()
+  }
+})
+
 test("account manager quota refreshes expired access tokens first", async () => {
   const done = await setupTestEnv()
   const calls: string[] = []

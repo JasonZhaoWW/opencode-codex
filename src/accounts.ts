@@ -1,9 +1,9 @@
 import type { PluginInput } from "@opencode-ai/plugin"
 import { clearInterval, setInterval } from "node:timers"
 import { setTimeout as sleep } from "node:timers/promises"
-import { DEFAULT_LIMIT_ID, DEFAULT_LIMIT_MS, LIMIT_STALE_MS } from "./constants.js"
+import { DEFAULT_LIMIT_ID, DEFAULT_LIMIT_MS, LIMIT_STALE_MS, OAUTH_SENTINEL_REFRESH } from "./constants.js"
 import { fetchUsageLimits, limitBlocked, limitReset, normalizeLimitId, type LimitMap } from "./limits.js"
-import { accessExpired, extractAccountIdentity, extractEmail, isPermanentTokenRefreshError, refreshAccessToken, tokenExpires, type TokenIdentity, type TokenResponse } from "./oauth.js"
+import { accessExpired, extractAccountIdentity, extractEmail, isPermanentTokenRefreshError, parseChatGptAccessToken, refreshAccessToken, tokenExpires, type TokenIdentity, type TokenResponse } from "./oauth.js"
 import { extendRefreshLock, loadManagedStore, releaseRefreshLock, tryAcquireRefreshLock, updateStore, type Account, type ManagedAccount, type ManagedStore } from "./storage.js"
 
 type Client = PluginInput["client"]
@@ -20,6 +20,19 @@ function now() {
 
 const REFRESH_LOCK_LEASE_MS = 2 * 60 * 1000
 const REFRESH_LOCK_POLL_MS = 50
+const REIMPORT_ACCESS_TOKEN_MESSAGE = "This ChatGPT access token cannot be refreshed. Re-import a fresh ChatGPT access token."
+const EXPIRED_NON_REFRESHABLE = "expired-non-refreshable"
+
+export class NonRefreshableTokenError extends Error {
+  constructor() {
+    super(REIMPORT_ACCESS_TOKEN_MESSAGE)
+    this.name = "NonRefreshableTokenError"
+  }
+}
+
+export function isNonRefreshableTokenError(err: unknown) {
+  return err instanceof NonRefreshableTokenError
+}
 
 async function acquireRefreshLock() {
   const owner = `${process.pid}-${now()}-${Math.random().toString(36).slice(2)}`
@@ -107,6 +120,7 @@ export class AccountManager {
     if (auth.type !== "oauth") return
     if (this.store.accounts.length > 0) return
     if (!auth.refresh || !auth.access || !auth.expires) return
+    if (auth.refresh === OAUTH_SENTINEL_REFRESH) return
     let seeded = false
     this.store = await updateStore((store) => {
       if (store.accounts.length > 0) return
@@ -145,8 +159,6 @@ export class AccountManager {
       ? accounts.findIndex((acc) => acc.refreshToken === current.refreshToken)
       : -1
     if (byRefreshToken >= 0) return byRefreshToken
-    const byEmail = current.email ? accounts.findIndex((acc) => acc.email === current.email) : -1
-    if (byEmail >= 0) return byEmail
     return fallback >= 0 && fallback < accounts.length ? fallback : -1
   }
 
@@ -198,11 +210,22 @@ export class AccountManager {
     return limitBlocked(acc.limits[id] || acc.limits[DEFAULT_LIMIT_ID], now())
   }
 
+  private async disableCurrent(acc: ManagedAccount, index: number) {
+    await this.mutateCurrent(acc, index, (current) => {
+      current.enabled = false
+    })
+    await this.sync()
+  }
+
   private async available(i: number) {
     const acc = this.store.accounts[i]
     if (!acc) return false
     if (!acc.enabled) return false
-    if (!this.fresh(acc)) await this.hydrate(i).catch(() => undefined)
+    if (!acc.refreshToken && accessExpired(acc.tokenExpires)) {
+      await this.disableCurrent(acc, i)
+      return EXPIRED_NON_REFRESHABLE
+    }
+    if (!this.fresh(acc) && (acc.refreshToken || !accessExpired(acc.tokenExpires))) await this.hydrate(i).catch(() => undefined)
     const hit = this.findCurrentIndex(acc, i)
     if (hit < 0) return false
     return !this.blocked(this.store.accounts[hit]!)
@@ -213,12 +236,18 @@ export class AccountManager {
       throw new Error("No ChatGPT accounts configured. Run opencode auth login --provider openai.")
     }
     const start = this.store.activeIndex
-    if (start !== skip && (await this.available(start))) return start
+    let expiredNonRefreshable = false
+    const active = start !== skip ? await this.available(start) : false
+    if (active === true) return start
+    if (active === EXPIRED_NON_REFRESHABLE) expiredNonRefreshable = true
     for (let n = 0; n < this.store.accounts.length; n++) {
       const i = (start + n + 1) % this.store.accounts.length
       if (i === skip) continue
-      if (await this.available(i)) return i
+      const available = await this.available(i)
+      if (available === true) return i
+      if (available === EXPIRED_NON_REFRESHABLE) expiredNonRefreshable = true
     }
+    if (expiredNonRefreshable) throw new NonRefreshableTokenError()
     const soon = this.store.accounts
       .map((acc) => this.reset(acc))
       .filter((val): val is number => typeof val === "number")
@@ -309,6 +338,14 @@ export class AccountManager {
         if (current.refreshToken !== acc.refreshToken || (!force && !accessExpired(current.tokenExpires)) || (force && changed && !accessExpired(current.tokenExpires))) {
           return { account: current, index: hit, remote: false }
         }
+        if (!current.refreshToken) {
+          this.store = await updateStore((store) => {
+            const latest = this.matchAccountIndex(store.accounts, current, hit)
+            if (latest < 0) throw new Error("Missing account")
+            store.accounts[latest]!.enabled = false
+          })
+          throw new NonRefreshableTokenError()
+        }
 
         const token = await refreshAccessToken(current.refreshToken)
         this.store = await updateStore((store) => {
@@ -328,11 +365,8 @@ export class AccountManager {
       if (sync && refreshed.remote) await this.hydrate(refreshed.index, false).catch(() => undefined)
       return refreshed.account
     } catch (err) {
-      if (isPermanentTokenRefreshError(err)) {
-        await this.mutateCurrent(acc, index, (current) => {
-          current.enabled = false
-        })
-        await this.sync()
+      if (isPermanentTokenRefreshError(err) || isNonRefreshableTokenError(err)) {
+        await this.disableCurrent(acc, index)
       }
       throw err
     }
@@ -381,6 +415,40 @@ export class AccountManager {
     await this.sync()
     const savedIndex = this.findExistingAccountIndex(acc)
     await this.hydrate(savedIndex >= 0 ? savedIndex : this.store.accounts.length - 1).catch(() => undefined)
+    return savedIndex >= 0 ? this.store.accounts[savedIndex]! : acc
+  }
+
+  async importAccessToken(accessToken: string, label: string) {
+    const token = parseChatGptAccessToken(accessToken)
+    const acc: ManagedAccount = {
+      label,
+      email: token.email,
+      planType: token.planType,
+      userId: token.userId,
+      accountId: token.accountId,
+      accessToken: token.accessToken,
+      tokenExpires: token.tokenExpires,
+      addedAt: now(),
+      lastUsed: 0,
+      enabled: true,
+      activeLimitId: DEFAULT_LIMIT_ID,
+      limits: {},
+    }
+    this.store = await updateStore((store) => {
+      const hit = this.findExistingAccountIndex(acc, store.accounts)
+      if (hit >= 0) {
+        const current = store.accounts[hit]!
+        const storageId = current.storageId
+        const refreshToken = current.refreshToken
+        store.accounts[hit] = { ...current, ...acc, refreshToken, ...(storageId ? { storageId } : {}) }
+      } else {
+        store.accounts.push(acc)
+      }
+      if (store.accounts.length === 1) store.activeIndex = 0
+    })
+    await this.sync()
+    const savedIndex = this.findExistingAccountIndex(acc)
+    await this.hydrate(savedIndex >= 0 ? savedIndex : this.store.accounts.length - 1, false).catch(() => undefined)
     return savedIndex >= 0 ? this.store.accounts[savedIndex]! : acc
   }
 
@@ -439,7 +507,7 @@ export class AccountManager {
       path: { id: "openai" },
       body: {
         type: "oauth",
-        refresh: acc.refreshToken,
+        refresh: acc.refreshToken ?? OAUTH_SENTINEL_REFRESH,
         access: acc.accessToken,
         expires: acc.tokenExpires,
         ...(acc.accountId ? { accountId: acc.accountId } : {}),

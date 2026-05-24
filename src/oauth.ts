@@ -42,19 +42,28 @@ type RefreshFailure = {
 }
 
 export type Claims = {
+  exp?: number
   email?: string
+  sub?: string
   chatgpt_plan_type?: string
   chatgpt_user_id?: string
   chatgpt_account_id?: string
+  chatgpt_workspace_id?: string
   user_id?: string
   organization_id?: string
+  workspace_id?: string
   organizations?: Array<{ id?: string }>
   "https://api.openai.com/auth"?: {
     chatgpt_plan_type?: string
     chatgpt_user_id?: string
     chatgpt_account_id?: string
+    chatgpt_workspace_id?: string
     user_id?: string
     organization_id?: string
+    workspace_id?: string
+  }
+  "https://api.openai.com/profile"?: {
+    email?: string
   }
 }
 
@@ -62,6 +71,15 @@ export type TokenIdentity = {
   planType?: string
   userId?: string
   accountId?: string
+}
+
+export type ImportedAccessToken = {
+  accessToken: string
+  tokenExpires: number
+  email?: string
+  planType?: string
+  userId?: string
+  accountId: string
 }
 
 function rand(n: number) {
@@ -250,7 +268,9 @@ export function parseJwtClaims(token: string | undefined) {
   const parts = token.split(".")
   if (parts.length !== 3) return
   try {
-    return JSON.parse(Buffer.from(parts[1]!, "base64url").toString()) as Claims
+    const parsed = JSON.parse(Buffer.from(parts[1]!, "base64url").toString()) as unknown
+    if (!object(parsed)) return
+    return parsed as Claims
   } catch {
     return
   }
@@ -279,17 +299,26 @@ export function extractAccountIdentity(tokens: Pick<TokenResponse, "id_token" | 
       accessClaims?.["https://api.openai.com/auth"]?.user_id,
       accessClaims?.chatgpt_user_id,
       accessClaims?.user_id,
+      accessClaims?.sub,
     ),
     accountId: pickClaim(
       idClaims?.["https://api.openai.com/auth"]?.chatgpt_account_id,
+      idClaims?.["https://api.openai.com/auth"]?.chatgpt_workspace_id,
       idClaims?.chatgpt_account_id,
+      idClaims?.chatgpt_workspace_id,
       accessClaims?.["https://api.openai.com/auth"]?.chatgpt_account_id,
+      accessClaims?.["https://api.openai.com/auth"]?.chatgpt_workspace_id,
       accessClaims?.chatgpt_account_id,
+      accessClaims?.chatgpt_workspace_id,
       idClaims?.["https://api.openai.com/auth"]?.organization_id,
+      idClaims?.["https://api.openai.com/auth"]?.workspace_id,
       idClaims?.organization_id,
+      idClaims?.workspace_id,
       idClaims?.organizations?.[0]?.id,
       accessClaims?.["https://api.openai.com/auth"]?.organization_id,
+      accessClaims?.["https://api.openai.com/auth"]?.workspace_id,
       accessClaims?.organization_id,
+      accessClaims?.workspace_id,
       accessClaims?.organizations?.[0]?.id,
     ),
   }
@@ -309,7 +338,30 @@ export function extractPlanType(tokens: Pick<TokenResponse, "id_token" | "access
 
 export function extractEmail(tokens: Pick<TokenResponse, "id_token" | "access_token">) {
   const claims = parseJwtClaims(tokens.id_token) ?? parseJwtClaims(tokens.access_token)
-  return claims?.email
+  return claims?.email ?? claims?.["https://api.openai.com/profile"]?.email
+}
+
+export function parseChatGptAccessToken(value: string): ImportedAccessToken {
+  const accessToken = value.trim()
+  const claims = parseJwtClaims(accessToken)
+  if (!claims) throw new Error("A valid ChatGPT OAuth access token is required.")
+  if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp) || claims.exp <= 0) {
+    throw new Error("The ChatGPT OAuth access token must include an expiration claim.")
+  }
+  const tokenExpires = Math.trunc(claims.exp * 1000)
+  if (tokenExpires <= Date.now()) throw new Error("The ChatGPT OAuth access token has expired. Re-import a fresh ChatGPT access token.")
+  const identity = extractAccountIdentity({ access_token: accessToken })
+  if (!identity.userId || !identity.accountId) {
+    throw new Error("The ChatGPT OAuth access token must include a ChatGPT user ID and account or workspace identifier for Codex request routing.")
+  }
+  return {
+    accessToken,
+    tokenExpires,
+    email: extractEmail({ access_token: accessToken }),
+    planType: identity.planType,
+    userId: identity.userId,
+    accountId: identity.accountId,
+  }
 }
 
 export function tokenExpires(expires: unknown) {

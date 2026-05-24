@@ -31,3 +31,37 @@ export function oauthToken({
     expires_in: 3600,
   }
 }
+
+export function chatgptAccessToken({
+  userId,
+  accountId,
+  organizationId,
+  workspaceId,
+  planType,
+  exp = Math.trunc(Date.now() / 1000) + 3600,
+  email = "user@example.com",
+  extra = {},
+}: {
+  userId?: string
+  accountId?: string
+  organizationId?: string
+  workspaceId?: string
+  planType?: string
+  exp?: number
+  email?: string
+  extra?: Record<string, unknown>
+} = {}) {
+  return jwt({
+    email,
+    exp,
+    ...(organizationId ? { organizations: [{ id: organizationId }] } : {}),
+    ...extra,
+    "https://api.openai.com/auth": {
+      ...(planType ? { chatgpt_plan_type: planType } : {}),
+      ...(userId ? { chatgpt_user_id: userId, user_id: userId } : {}),
+      ...(accountId ? { chatgpt_account_id: accountId } : {}),
+      ...(organizationId ? { organization_id: organizationId } : {}),
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
+    },
+  })
+}
