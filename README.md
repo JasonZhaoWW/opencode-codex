@@ -45,6 +45,16 @@ opencode auth login --provider openai
 
 In a normal TTY terminal it opens a navigable account-management menu. In non-TTY environments it falls back to a readline flow.
 
+From this menu you can add accounts in three ways:
+
+- `Add account (browser)` starts the normal browser OAuth flow
+- `Add account (headless)` starts the device-code flow for remote or browserless environments
+- `Import ChatGPT access token` imports an existing ChatGPT OAuth access token directly
+
+To use an access token directly, select `Import ChatGPT access token`, enter an account label, then paste the ChatGPT OAuth access token when prompted. The token must be a valid, unexpired ChatGPT OAuth JWT that includes both the ChatGPT user ID and account or workspace ID used for Codex routing.
+
+Access-token imports are non-refreshable unless the same account was already added through OAuth. When an imported token expires or receives an authorization failure, the plugin disables that account and you need to import a fresh ChatGPT access token. Re-importing a token for the same ChatGPT identity updates the saved token; if that identity already has an OAuth refresh token, the refresh token is preserved.
+
 From the management flow you can:
 
 - Inspect which account is currently active for routing
@@ -64,15 +74,17 @@ While the plugin is active, `openai` OAuth is treated as the Codex subscription 
 ## Requirements
 
 - OpenCode with npm plugin loading enabled
-- A Codex-compatible OpenAI account
+- A Codex-compatible OpenAI account or a valid ChatGPT OAuth access token
 - Bun for local development and test runs
 
 ## Behavior
 
+- Supports browser OAuth, headless device-code login, and direct ChatGPT OAuth access-token imports
 - Sticky account selection
 - Switches immediately on `429`
 - Tracks per-account Codex usage windows from response headers and `GET /backend-api/wham/usage`
 - Respects 5-hour, weekly, and alternate metered-bucket exhaustion during account rotation
+- Disables expired or unauthorized access-token-only accounts instead of trying OAuth refresh
 - Fails fast when all accounts are rate-limited
 
 ## Config
